@@ -124,7 +124,7 @@ public final class GameView extends View implements Runnable {
         setFocusable(true);
         setKeepScreenOn(true);
         density = getResources().getDisplayMetrics().density;
-        menuBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc);
+        menuBitmap = decodeMenuBitmap();
         preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         soundEnabled = preferences.getBoolean(KEY_SOUND, true);
         vibrationEnabled = preferences.getBoolean(KEY_VIBRATION, true);
@@ -138,15 +138,27 @@ public final class GameView extends View implements Runnable {
         text.setTextAlign(Paint.Align.CENTER);
         smallText.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         smallText.setTextAlign(Paint.Align.CENTER);
-        Log.i(TAG, "INIT_OK version=1.1.1");
+        Log.i(TAG, "INIT_OK version=1.2.0");
+    }
+
+    private Bitmap decodeMenuBitmap() {
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inScaled = false;
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            return BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc, options);
+        } catch (RuntimeException runtimeException) {
+            Log.e(TAG, "MENU_BITMAP_ERROR", runtimeException);
+            return null;
+        } catch (OutOfMemoryError outOfMemoryError) {
+            Log.e(TAG, "MENU_BITMAP_OOM", outOfMemoryError);
+            return null;
+        }
     }
 
     private void ensureMenuBitmap() {
         if (menuBitmap == null || menuBitmap.isRecycled()) {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inScaled = false;
-            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            menuBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc, options);
+            menuBitmap = decodeMenuBitmap();
         }
     }
 
@@ -201,6 +213,27 @@ public final class GameView extends View implements Runnable {
             createToneGenerator();
         }
         startLoop();
+    }
+
+    void runSmokeCommand(String rawCommand) {
+        String command = rawCommand == null ? "" : rawCommand.trim().toLowerCase(Locale.ROOT);
+        if ("menu".equals(command)) {
+            goToMenu();
+        } else if ("lozhkin".equals(command)) {
+            startHero(Hero.LOZHKIN);
+            beginPlaying();
+        } else if ("rak".equals(command)) {
+            startHero(Hero.RAK);
+            beginPlaying();
+        } else if ("korolev".equals(command)) {
+            startHero(Hero.KOROLEV);
+            beginPlaying();
+        } else {
+            Log.e(TAG, "UNKNOWN_SMOKE_COMMAND " + rawCommand);
+            return;
+        }
+        Log.i(TAG, "SMOKE_COMMAND_OK " + command);
+        invalidate();
     }
 
     public boolean handleBack() {
@@ -948,7 +981,7 @@ public final class GameView extends View implements Runnable {
                 lines.add("Алик: нажимай на сторону, где появился котёл, чтобы бросить полено.");
                 lines.add("Андрей: нажимай на сторону с огнём, чтобы направить струю воды.");
                 lines.add("У каждого героя 10 уровней. Три промаха — проигрыш.");
-                lines.add("Версия игры: 1.1.1");
+                lines.add("Версия игры: 1.2.0");
                 break;
             case RECORDS:
                 title = "РЕКОРДЫ";

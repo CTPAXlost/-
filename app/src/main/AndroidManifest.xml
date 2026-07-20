@@ -15,6 +15,7 @@
             android:name=".MainActivity"
             android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode"
             android:exported="true"
+            android:launchMode="singleTop"
             android:screenOrientation="portrait"
             android:resizeableActivity="false">
             <intent-filter>

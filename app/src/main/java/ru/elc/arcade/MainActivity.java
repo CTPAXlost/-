@@ -1,6 +1,8 @@
 package ru.elc.arcade;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,10 +28,39 @@ public final class MainActivity extends Activity {
         try {
             gameView = new GameView(this);
             setContentView(gameView);
+            applySmokeIntent(getIntent());
         } catch (RuntimeException runtimeException) {
             Log.e(TAG, "STARTUP_ERROR", runtimeException);
             showStartupError();
         }
+    }
+
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        applySmokeIntent(intent);
+    }
+
+    private void applySmokeIntent(Intent intent) {
+        if (gameView == null || intent == null || !isDebuggable()) {
+            return;
+        }
+        final String command = intent.getStringExtra("elc_smoke");
+        if (command == null || command.trim().isEmpty()) {
+            return;
+        }
+        gameView.post(new Runnable() {
+            @Override
+            public void run() {
+                gameView.runSmokeCommand(command);
+            }
+        });
+    }
+
+    private boolean isDebuggable() {
+        return (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
     }
 
     private void showStartupError() {
@@ -39,7 +70,7 @@ public final class MainActivity extends Activity {
         error.setGravity(Gravity.CENTER);
         error.setTextSize(22f);
         error.setPadding(48, 48, 48, 48);
-        error.setText("ЕЛЦ\n\nНе удалось запустить игровой экран.\nПерезапусти приложение.\n\nВерсия 1.1.1");
+        error.setText("ЕЛЦ\n\nНе удалось запустить игровой экран.\nПерезапусти приложение.\n\nВерсия 1.2.0");
         setContentView(error);
     }
 

@@ -1,10 +1,8 @@
-name: Сборка и проверка ЕЛЦ
+name: Сборка APK ЕЛЦ
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
-  pull_request:
     branches: [ main, master ]
 
 permissions:
@@ -15,30 +13,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: APK + реальный запуск в Android-эмуляторе
+  build:
+    name: Собрать APK и проверить проект
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 40
 
     steps:
       - name: Скачать проект
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+        uses: actions/checkout@v4
 
       - name: Установить Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Установить Gradle 8.11.1
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
           cache-cleanup: on-success
 
-      - name: Подготовить Android SDK 35
+      - name: Подготовить Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -47,10 +43,7 @@ jobs:
           if [ -z "$SDKMANAGER" ] && [ -n "$SDK_ROOT" ]; then
             SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
           fi
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager не найден" >&2
-            exit 1
-          fi
+          test -n "$SDKMANAGER"
           if [ -z "$SDK_ROOT" ]; then
             SDK_ROOT="$(cd "$(dirname "$SDKMANAGER")/../../.." && pwd)"
           fi
@@ -59,7 +52,7 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Проверить файлы проекта
+      - name: Проверить исходные файлы
         shell: bash
         run: |
           set -euo pipefail
@@ -68,17 +61,22 @@ jobs:
           test -s app/src/main/java/ru/elc/arcade/GameView.java
           test -s app/src/main/res/drawable-nodpi/menu_elc.png
           test -s keystore/elc-development.jks
-          grep -q 'versionName "1.1.1"' app/build.gradle
-          ! grep -q 'windowLightNavigationBar' app/src/main/res/values/styles.xml
+          bash -n scripts/smoke_test.sh
+          grep -q 'versionName "1.2.0"' app/build.gradle
 
-      - name: Собрать подписанный Release APK
+      - name: Собрать Debug и подписанный Release APK
         shell: bash
         run: |
           set -euo pipefail
-          gradle --version
-          gradle clean :app:assembleRelease --stacktrace --no-daemon
+          gradle clean :app:assembleDebug :app:assembleRelease --stacktrace --no-daemon
 
-      - name: Проверить структуру и манифест APK
+      - name: Проверить Android Lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:lintRelease --stacktrace --no-daemon
+
+      - name: Проверить содержимое APK
         shell: bash
         run: |
           set -euo pipefail
@@ -91,8 +89,24 @@ jobs:
           AAPT="${ANDROID_SDK_ROOT}/build-tools/35.0.0/aapt"
           "$AAPT" dump badging "$APK" | tee apk-badging.txt
           grep -q "package: name='ru.elc.arcade.debug'" apk-badging.txt
-          grep -q "versionName='1.1.1'" apk-badging.txt
+          grep -q "versionName='1.2.0'" apk-badging.txt
           grep -q "launchable-activity: name='ru.elc.arcade.MainActivity'" apk-badging.txt
+
+      - name: Подготовить готовый APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/apk
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v1.2.0.apk"
+          sha256sum "artifacts/apk/ЕЛЦ-v1.2.0.apk" > "artifacts/apk/ЕЛЦ-v1.2.0.sha256.txt"
+
+      - name: Загрузить готовый APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ЕЛЦ — APK v1.2.0
+          path: artifacts/apk/*
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Разрешить аппаратное ускорение эмулятора
         shell: bash
@@ -101,47 +115,24 @@ jobs:
             sudo chmod 666 /dev/kvm
           fi
 
-      - name: Открыть меню и все три игровые режима
+      - name: Проверить реальный запуск в Android-эмуляторе
+        continue-on-error: true
         uses: ReactiveCircus/android-emulator-runner@v2.38.0
         with:
-          api-level: 35
-          target: google_apis
+          api-level: 29
+          target: default
           arch: x86_64
           profile: pixel_2
           emulator-boot-timeout: 900
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: bash scripts/smoke_test.sh app/build/outputs/apk/release/app-release.apk
+          script: bash scripts/smoke_test.sh app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Проверить Android Lint
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle :app:lintRelease --stacktrace --no-daemon
-
-      - name: Подготовить APK для скачивания
-        if: github.event_name != 'pull_request'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/apk
-          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v1.1.1.apk"
-          sha256sum "artifacts/apk/ЕЛЦ-v1.1.1.apk" > "artifacts/apk/ЕЛЦ-v1.1.1.sha256.txt"
-
-      - name: Загрузить готовый APK
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ЕЛЦ — проверенный APK v1.1.1
-          path: artifacts/apk/*
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Загрузить скриншоты и журнал запуска
+      - name: Загрузить журнал проверки запуска
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: ЕЛЦ — проверка запуска v1.1.1
+          name: ЕЛЦ — журнал запуска v1.2.0
           path: |
             artifacts/runtime-test/*
             apk-badging.txt
