@@ -1,0 +1,143 @@
+name: Сборка и проверка ЕЛЦ
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: elc-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: APK + запуск в Android-эмуляторе
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Скачать проект
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Установить Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Установить Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.11.1"
+          cache-cleanup: on-success
+
+      - name: Подготовить Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$SDKMANAGER" ] && [ -n "$SDK_ROOT" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager не найден" >&2
+            exit 1
+          fi
+          if [ -z "$SDK_ROOT" ]; then
+            SDK_ROOT="$(cd "$(dirname "$SDKMANAGER")/../../.." && pwd)"
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Проверить Java-код и ресурсы
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s app/src/main/AndroidManifest.xml
+          test -s app/src/main/java/ru/elc/arcade/MainActivity.java
+          test -s app/src/main/java/ru/elc/arcade/GameView.java
+          test -s app/src/main/res/drawable-nodpi/menu_elc.png
+          test -s keystore/elc-development.jks
+
+      - name: Собрать подписанный Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle clean :app:assembleRelease :app:lintRelease --stacktrace --no-daemon
+
+      - name: Проверить структуру и манифест APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -q 'AndroidManifest.xml'
+          unzip -l "$APK" | grep -q 'classes.dex'
+          unzip -l "$APK" | grep -q 'resources.arsc'
+          AAPT="${ANDROID_SDK_ROOT}/build-tools/35.0.0/aapt"
+          "$AAPT" dump badging "$APK" | tee apk-badging.txt
+          grep -q "package: name='ru.elc.arcade.debug'" apk-badging.txt
+          grep -q "launchable-activity: name='ru.elc.arcade.MainActivity'" apk-badging.txt
+
+      - name: Разрешить аппаратное ускорение эмулятора
+        shell: bash
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Запустить APK и проверить все три режима
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          emulator-boot-timeout: 900
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash scripts/smoke_test.sh app/build/outputs/apk/release/app-release.apk
+
+      - name: Подготовить файлы для скачивания
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/apk
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v1.1.0.apk"
+          sha256sum "artifacts/apk/ЕЛЦ-v1.1.0.apk" > "artifacts/apk/ЕЛЦ-v1.1.0.sha256.txt"
+
+      - name: Загрузить готовый APK
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ЕЛЦ — проверенный APK v1.1.0
+          path: artifacts/apk/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Загрузить скриншоты и журнал запуска
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ЕЛЦ — проверка запуска v1.1.0
+          path: |
+            artifacts/runtime-test/*
+            apk-badging.txt
+            app/build/reports/lint-results-release.html
+            app/build/reports/lint-results-release.xml
+            app/build/reports/lint-results-release.txt
+          if-no-files-found: ignore
+          retention-days: 14

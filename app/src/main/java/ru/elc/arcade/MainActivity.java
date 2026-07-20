@@ -1,13 +1,16 @@
 package ru.elc.arcade;
 
 import android.app.Activity;
+import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.widget.TextView;
 
 public final class MainActivity extends Activity {
     private GameView gameView;
@@ -18,8 +21,23 @@ public final class MainActivity extends Activity {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
-        gameView = new GameView(this);
-        setContentView(gameView);
+        try {
+            gameView = new GameView(this);
+            setContentView(gameView);
+        } catch (RuntimeException runtimeException) {
+            showStartupError();
+        }
+    }
+
+    private void showStartupError() {
+        TextView error = new TextView(this);
+        error.setBackgroundColor(Color.rgb(14, 18, 21));
+        error.setTextColor(Color.WHITE);
+        error.setGravity(Gravity.CENTER);
+        error.setTextSize(22f);
+        error.setPadding(48, 48, 48, 48);
+        error.setText("ЕЛЦ\n\nНе удалось запустить игровой экран.\nПерезапусти приложение.\n\nВерсия 1.1.0");
+        setContentView(error);
     }
 
     private void hideSystemUi() {

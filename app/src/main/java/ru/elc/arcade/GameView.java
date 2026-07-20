@@ -37,6 +37,7 @@ public final class GameView extends View implements Runnable {
 
     private enum Screen {
         MENU,
+        READY,
         PLAYING,
         PAUSED,
         LEVEL_COMPLETE,
@@ -135,7 +136,15 @@ public final class GameView extends View implements Runnable {
         smallText.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         smallText.setTextAlign(Paint.Align.CENTER);
 
-        createToneGenerator();
+    }
+
+    private void ensureMenuBitmap() {
+        if (menuBitmap == null || menuBitmap.isRecycled()) {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inScaled = false;
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            menuBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc, options);
+        }
     }
 
     private void createToneGenerator() {
@@ -171,10 +180,6 @@ public final class GameView extends View implements Runnable {
         loopRunning = false;
         removeCallbacks(this);
         releaseToneGenerator();
-        if (menuBitmap != null) {
-            menuBitmap.recycle();
-            menuBitmap = null;
-        }
         super.onDetachedFromWindow();
     }
 
@@ -187,6 +192,7 @@ public final class GameView extends View implements Runnable {
 
     public void onHostResume() {
         hostPaused = false;
+        ensureMenuBitmap();
         if (soundEnabled) {
             createToneGenerator();
         }
@@ -223,7 +229,11 @@ public final class GameView extends View implements Runnable {
         float dt = Math.min(0.05f, Math.max(0f, (now - lastFrameTime) / 1000f));
         lastFrameTime = now;
         if (!hostPaused) {
-            update(dt, now);
+            try {
+                update(dt, now);
+            } catch (RuntimeException runtimeException) {
+                recoverFromRuntimeError(runtimeException);
+            }
         }
         invalidate();
         postOnAnimation(this);
@@ -413,10 +423,20 @@ public final class GameView extends View implements Runnable {
         prompts.clear();
         particles.clear();
         actionEffects.clear();
-        screen = Screen.PLAYING;
+        screen = Screen.READY;
         dialog = Dialog.NONE;
-        lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 350;
         softTone(ToneGenerator.TONE_PROP_ACK, 100);
+    }
+
+    private void beginPlaying() {
+        movingItems.clear();
+        prompts.clear();
+        particles.clear();
+        actionEffects.clear();
+        screen = Screen.PLAYING;
+        lastFrameTime = SystemClock.uptimeMillis();
+        lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 350;
+        softTone(ToneGenerator.TONE_PROP_ACK, 90);
     }
 
     private void startNextLevel() {
@@ -510,16 +530,22 @@ public final class GameView extends View implements Runnable {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (screen == Screen.MENU) {
-            drawMenu(canvas);
-        } else {
-            drawGame(canvas);
-            if (screen != Screen.PLAYING) {
-                drawGameOverlay(canvas);
+        try {
+            ensureMenuBitmap();
+            if (screen == Screen.MENU) {
+                drawMenu(canvas);
+            } else {
+                drawGame(canvas);
+                if (screen != Screen.PLAYING) {
+                    drawGameOverlay(canvas);
+                }
             }
-        }
-        if (dialog != Dialog.NONE) {
-            drawDialog(canvas);
+            if (dialog != Dialog.NONE) {
+                drawDialog(canvas);
+            }
+        } catch (RuntimeException runtimeException) {
+            recoverFromRuntimeError(runtimeException);
+            drawEmergencyScreen(canvas);
         }
     }
 
@@ -549,6 +575,7 @@ public final class GameView extends View implements Runnable {
     }
 
     private void drawFallbackMenu(Canvas canvas) {
+        menuDst.set(0f, 0f, width, height);
         paint.setShader(new LinearGradient(0, 0, 0, height, 0xFF14212A, 0xFF080B0D, Shader.TileMode.CLAMP));
         canvas.drawRect(0, 0, width, height, paint);
         paint.setShader(null);
@@ -567,6 +594,7 @@ public final class GameView extends View implements Runnable {
     private void drawGame(Canvas canvas) {
         drawGameBackground(canvas);
         drawPlayField(canvas);
+        drawControlZones(canvas);
         drawCharacter(canvas);
         drawHud(canvas);
         drawParticles(canvas);
@@ -691,6 +719,53 @@ public final class GameView extends View implements Runnable {
         }
     }
 
+    private void drawControlZones(Canvas canvas) {
+        String[] labels = {"СЛЕВА СВЕРХУ", "СЛЕВА СНИЗУ", "СПРАВА СВЕРХУ", "СПРАВА СНИЗУ"};
+        for (int lane = 0; lane < 4; lane++) {
+            PointF point = lanePoint(lane);
+            boolean selected = hero == Hero.LOZHKIN && selectedLane == lane;
+            float halfW = width * 0.125f;
+            float halfH = height * 0.072f;
+            RectF zone = new RectF(point.x - halfW, point.y - halfH, point.x + halfW, point.y + halfH);
+            paint.setColor(selected ? 0x55FFD43A : 0x26000000);
+            canvas.drawRoundRect(zone, width * 0.025f, width * 0.025f, paint);
+            stroke.setStrokeWidth(selected ? width * 0.009f : width * 0.004f);
+            stroke.setColor(selected ? 0xFFFFD43A : 0x66FFFFFF);
+            canvas.drawRoundRect(zone, width * 0.025f, width * 0.025f, stroke);
+            drawCenteredText(canvas, labels[lane], point.x, zone.bottom - height * 0.012f, width * 0.020f, selected ? 0xFFFFE47A : 0xBFFFFFFF);
+        }
+        String hint;
+        if (hero == Hero.LOZHKIN) {
+            hint = "КОСНИСЬ НУЖНОГО СЕКТОРА — ПАКЕТ ПЕРЕМЕСТИТСЯ";
+        } else if (hero == Hero.RAK) {
+            hint = "КОСНИСЬ КОТЛА — ПОЛЕНО ПОЛЕТИТ В НЕГО";
+        } else {
+            hint = "КОСНИСЬ ОГНЯ — СТРУЯ ВОДЫ ПОТУШИТ ЕГО";
+        }
+        paint.setColor(0xB8000000);
+        RectF hintBox = new RectF(width * 0.06f, height * 0.925f, width * 0.94f, height * 0.975f);
+        canvas.drawRoundRect(hintBox, width * 0.02f, width * 0.02f, paint);
+        drawCenteredText(canvas, hint, width * 0.5f, hintBox.centerY() + width * 0.011f, width * 0.024f, 0xFFFFD85A);
+    }
+
+    private void recoverFromRuntimeError(RuntimeException runtimeException) {
+        movingItems.clear();
+        prompts.clear();
+        particles.clear();
+        actionEffects.clear();
+        screen = Screen.MENU;
+        dialog = Dialog.NONE;
+        lastSpawnTime = SystemClock.uptimeMillis();
+    }
+
+    private void drawEmergencyScreen(Canvas canvas) {
+        canvas.drawColor(0xFF101417);
+        menuDst.set(0f, 0f, width, height);
+        drawCenteredText(canvas, "ЕЛЦ", width * 0.5f, height * 0.24f, width * 0.20f, 0xFFFFC52E);
+        drawCenteredText(canvas, "ИГРА ВОССТАНОВЛЕНА", width * 0.5f, height * 0.40f, width * 0.052f, Color.WHITE);
+        drawWrappedCenteredText(canvas, "Коснись экрана, чтобы вернуться в главное меню", width * 0.5f, height * 0.49f, width * 0.78f, width * 0.036f, 0xFFFFD765, height * 0.045f);
+    }
+
     private void drawHud(Canvas canvas) {
         RectF hud = new RectF(width * 0.02f, height * 0.018f, width * 0.98f, height * 0.13f);
         drawPanel(canvas, hud, 0xFFFFC42A, 0xE614171A, width * 0.012f);
@@ -709,10 +784,16 @@ public final class GameView extends View implements Runnable {
         paint.setColor(0x88000000);
         canvas.drawRoundRect(progressBg, progressBg.height() * 0.5f, progressBg.height() * 0.5f, paint);
         float fraction = targetForLevel() == 0 ? 0f : Math.min(1f, progress / (float) targetForLevel());
-        RectF progressFill = new RectF(progressBg.left, progressBg.top, progressBg.left + progressBg.width() * fraction, progressBg.bottom);
-        paint.setShader(new LinearGradient(progressFill.left, 0, progressFill.right, 0, 0xFFFFB21A, 0xFFFFE760, Shader.TileMode.CLAMP));
-        canvas.drawRoundRect(progressFill, progressBg.height() * 0.5f, progressBg.height() * 0.5f, paint);
-        paint.setShader(null);
+        if (fraction > 0.001f) {
+            RectF progressFill = new RectF(progressBg.left, progressBg.top, progressBg.left + progressBg.width() * fraction, progressBg.bottom);
+            if (progressFill.width() > 1f) {
+                paint.setShader(new LinearGradient(progressFill.left, 0, progressFill.right, 0, 0xFFFFB21A, 0xFFFFE760, Shader.TileMode.CLAMP));
+            } else {
+                paint.setColor(0xFFFFB21A);
+            }
+            canvas.drawRoundRect(progressFill, progressBg.height() * 0.5f, progressBg.height() * 0.5f, paint);
+            paint.setShader(null);
+        }
         drawCenteredText(canvas, progress + " / " + targetForLevel(), width * 0.5f, height * 0.178f, width * 0.028f, Color.WHITE);
     }
 
@@ -791,7 +872,18 @@ public final class GameView extends View implements Runnable {
         String subtitle;
         String primary;
         String secondary;
-        if (screen == Screen.PAUSED) {
+        if (screen == Screen.READY) {
+            title = hero.name.toUpperCase(Locale.getDefault());
+            if (hero == Hero.LOZHKIN) {
+                subtitle = "Нажимай на один из четырёх секторов и подставляй пакет под бутылку";
+            } else if (hero == Hero.RAK) {
+                subtitle = "Нажимай на сектор, где появился котёл, чтобы бросить полено";
+            } else {
+                subtitle = "Нажимай на сектор с огнём, чтобы направить туда воду";
+            }
+            primary = "НАЧАТЬ ИГРУ";
+            secondary = "В МЕНЮ";
+        } else if (screen == Screen.PAUSED) {
             title = "ПАУЗА";
             subtitle = "Игра остановлена";
             primary = "ПРОДОЛЖИТЬ";
@@ -813,7 +905,7 @@ public final class GameView extends View implements Runnable {
             secondary = "В МЕНЮ";
         }
         drawCenteredText(canvas, title, width * 0.5f, panel.top + height * 0.105f, width * 0.058f, 0xFFFFD040);
-        drawCenteredText(canvas, subtitle, width * 0.5f, panel.top + height * 0.17f, width * 0.035f, Color.WHITE);
+        drawWrappedCenteredText(canvas, subtitle, width * 0.5f, panel.top + height * 0.17f, panel.width() * 0.78f, width * 0.034f, Color.WHITE, height * 0.042f);
         drawButton(canvas, overlayPrimaryRect(), primary, true);
         drawButton(canvas, overlaySecondaryRect(), secondary, false);
     }
@@ -847,6 +939,7 @@ public final class GameView extends View implements Runnable {
                 lines.add("Алик: нажимай на сторону, где появился котёл, чтобы бросить полено.");
                 lines.add("Андрей: нажимай на сторону с огнём, чтобы направить струю воды.");
                 lines.add("У каждого героя 10 уровней. Три промаха — проигрыш.");
+                lines.add("Версия игры: 1.1.0");
                 break;
             case RECORDS:
                 title = "РЕКОРДЫ";
@@ -1253,6 +1346,9 @@ public final class GameView extends View implements Runnable {
         }
 
         if (screen == Screen.MENU) {
+            if (menuDst.width() <= 0f) {
+                menuDst.set(0f, 0f, width, height);
+            }
             handleMenuTouch(x, y);
             return true;
         }
@@ -1284,11 +1380,13 @@ public final class GameView extends View implements Runnable {
     }
 
     private void handleMenuTouch(float x, float y) {
-        if (menuBitmap == null || menuDst.width() <= 0f || !menuDst.contains(x, y)) {
+        if (menuDst.width() <= 0f || !menuDst.contains(x, y)) {
             return;
         }
-        float sx = (x - menuDst.left) * menuBitmap.getWidth() / menuDst.width();
-        float sy = (y - menuDst.top) * menuBitmap.getHeight() / menuDst.height();
+        float sourceWidth = menuBitmap != null && !menuBitmap.isRecycled() ? menuBitmap.getWidth() : 941f;
+        float sourceHeight = menuBitmap != null && !menuBitmap.isRecycled() ? menuBitmap.getHeight() : 1672f;
+        float sx = (x - menuDst.left) * sourceWidth / menuDst.width();
+        float sy = (y - menuDst.top) * sourceHeight / menuDst.height();
 
         if (sx < 125 && sy < 140) {
             dialog = Dialog.SETTINGS;
@@ -1355,7 +1453,9 @@ public final class GameView extends View implements Runnable {
 
     private void handleOverlayTouch(float x, float y) {
         if (overlayPrimaryRect().contains(x, y)) {
-            if (screen == Screen.PAUSED) {
+            if (screen == Screen.READY) {
+                beginPlaying();
+            } else if (screen == Screen.PAUSED) {
                 screen = Screen.PLAYING;
                 lastSpawnTime = SystemClock.uptimeMillis();
             } else if (screen == Screen.LEVEL_COMPLETE) {

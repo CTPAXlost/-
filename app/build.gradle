@@ -7,27 +7,37 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId "ru.elc.arcade"
+        applicationId "ru.elc.arcade.debug"
         minSdk 23
         targetSdk 35
-        versionCode 2
-        versionName "1.0.1"
+        versionCode 3
+        versionName "1.1.0"
+    }
+
+    signingConfigs {
+        elcDevelopment {
+            storeFile file("../keystore/elc-development.jks")
+            storePassword "ELC-development-2026"
+            keyAlias "elc"
+            keyPassword "ELC-development-2026"
+        }
     }
 
     buildTypes {
         debug {
-            applicationIdSuffix ".debug"
-            versionNameSuffix "-debug"
+            signingConfig signingConfigs.elcDevelopment
         }
         release {
+            signingConfig signingConfigs.elcDevelopment
             minifyEnabled false
+            shrinkResources false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 
     lint {
