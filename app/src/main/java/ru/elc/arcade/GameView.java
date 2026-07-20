@@ -29,7 +29,9 @@ public final class GameView extends View implements Runnable {
 
     private static final String TAG = "ELC_RUNTIME";
     private static final int MAX_LEVEL = 10;
-    private static final int SKIN_COST = 100;
+    private static final int ORIGINAL_SKIN_COST = 100;
+    private static final int FUN_SKIN_COST = 200;
+    private static final long LEVEL_OUTRO_DURATION_MS = 3400L;
     private static final String PREFS = "elc_v2";
 
     private enum Screen {
@@ -37,8 +39,8 @@ public final class GameView extends View implements Runnable {
         SHOP,
         COUNTDOWN,
         PLAYING,
+        LEVEL_OUTRO,
         PAUSED,
-        LEVEL_DONE,
         GAME_OVER,
         VICTORY
     }
@@ -59,7 +61,8 @@ public final class GameView extends View implements Runnable {
 
     private enum Skin {
         DEFAULT("Базовый"),
-        ORIGINAL("Оригинальная одежда");
+        ORIGINAL("Оригинальная одежда"),
+        FUN("Весёлый скин");
 
         final String title;
 
@@ -80,7 +83,8 @@ public final class GameView extends View implements Runnable {
     private final SharedPreferences preferences;
     private final Hero[] shopHeroes = new Hero[]{Hero.LOZHKIN, Hero.RAK, Hero.KOROLEV};
     private final RectF[] shopCardRects = new RectF[]{new RectF(), new RectF(), new RectF()};
-    private final RectF[] shopButtonRects = new RectF[]{new RectF(), new RectF(), new RectF()};
+    private final RectF[] shopOriginalButtonRects = new RectF[]{new RectF(), new RectF(), new RectF()};
+    private final RectF[] shopFunButtonRects = new RectF[]{new RectF(), new RectF(), new RectF()};
 
     private Bitmap menuBitmap;
     private Bitmap headLozhkin;
@@ -97,6 +101,7 @@ public final class GameView extends View implements Runnable {
     private long lastFrameMs;
     private long lastSpawnMs;
     private long countdownStartMs;
+    private long levelOutroStartMs;
     private float worldTime;
 
     private int level = 1;
@@ -235,6 +240,17 @@ public final class GameView extends View implements Runnable {
             successFlash = Math.max(0f, successFlash - dt);
         }
         updateSparks(dt);
+
+        if (screen == Screen.LEVEL_OUTRO) {
+            if (now - levelOutroStartMs >= LEVEL_OUTRO_DURATION_MS) {
+                if (level >= MAX_LEVEL) {
+                    screen = Screen.VICTORY;
+                } else {
+                    nextLevel();
+                }
+            }
+            return;
+        }
 
         if (screen == Screen.COUNTDOWN) {
             if (now - countdownStartMs >= 3000L) {
@@ -397,11 +413,7 @@ public final class GameView extends View implements Runnable {
             targets.clear();
             saveBestScore();
             saveUnlockedLevel();
-            if (level >= MAX_LEVEL) {
-                screen = Screen.VICTORY;
-            } else {
-                screen = Screen.LEVEL_DONE;
-            }
+            beginLevelOutro();
         }
     }
 
@@ -480,6 +492,14 @@ public final class GameView extends View implements Runnable {
         beginCountdown();
     }
 
+    private void beginLevelOutro() {
+        screen = Screen.LEVEL_OUTRO;
+        levelOutroStartMs = SystemClock.uptimeMillis();
+        actionTimer = 0f;
+        bottles.clear();
+        targets.clear();
+    }
+
     private void beginCountdown() {
         screen = Screen.COUNTDOWN;
         countdownStartMs = SystemClock.uptimeMillis();
@@ -549,6 +569,9 @@ public final class GameView extends View implements Runnable {
 
     private Skin selectedSkin(Hero targetHero) {
         int value = preferences.getInt("skin_selected_" + targetHero.name(), 0);
+        if (value == 2 && isSkinOwned(targetHero, Skin.FUN)) {
+            return Skin.FUN;
+        }
         if (value == 1 && isSkinOwned(targetHero, Skin.ORIGINAL)) {
             return Skin.ORIGINAL;
         }
@@ -560,29 +583,57 @@ public final class GameView extends View implements Runnable {
     }
 
     private void selectSkin(Hero targetHero, Skin skin) {
-        if (skin == Skin.ORIGINAL && !isSkinOwned(targetHero, skin)) {
+        if (!isSkinOwned(targetHero, skin)) {
             return;
         }
-        preferences.edit().putInt("skin_selected_" + targetHero.name(), skin == Skin.ORIGINAL ? 1 : 0).apply();
+        int value = skin == Skin.ORIGINAL ? 1 : (skin == Skin.FUN ? 2 : 0);
+        preferences.edit().putInt("skin_selected_" + targetHero.name(), value).apply();
     }
 
-    private void buyOrSelectOriginalSkin(Hero targetHero) {
-        if (isSkinOwned(targetHero, Skin.ORIGINAL)) {
-            selectSkin(targetHero, Skin.ORIGINAL);
-            showNotice(targetHero.title + ": выбран скин «Оригинальная одежда»", 1800L);
+    private int skinCost(Skin skin) {
+        return skin == Skin.FUN ? FUN_SKIN_COST : ORIGINAL_SKIN_COST;
+    }
+
+    private String skinDisplayName(Hero targetHero, Skin skin) {
+        if (skin == Skin.ORIGINAL) {
+            return "Оригинальная одежда";
+        }
+        if (skin == Skin.FUN) {
+            if (targetHero == Hero.LOZHKIN) {
+                return "Праздничный ловец";
+            }
+            if (targetHero == Hero.RAK) {
+                return "Супер-Алик";
+            }
+            return "Пляжный пожарный";
+        }
+        return "Базовый";
+    }
+
+    private void buyOrSelectSkin(Hero targetHero, Skin skin) {
+        if (skin == Skin.DEFAULT) {
+            selectSkin(targetHero, skin);
             return;
         }
-        if (coins < SKIN_COST) {
-            showNotice("Не хватает монет. Нужно 100", 1800L);
+        String displayName = skinDisplayName(targetHero, skin);
+        if (isSkinOwned(targetHero, skin)) {
+            selectSkin(targetHero, skin);
+            showNotice(targetHero.title + ": выбран скин «" + displayName + "»", 1800L);
             return;
         }
-        coins -= SKIN_COST;
+        int cost = skinCost(skin);
+        if (coins < cost) {
+            showNotice("Не хватает монет. Нужно " + cost, 1800L);
+            return;
+        }
+        coins -= cost;
+        int selectedValue = skin == Skin.FUN ? 2 : 1;
         preferences.edit()
                 .putInt("coins", coins)
-                .putBoolean("skin_owned_" + targetHero.name() + "_ORIGINAL", true)
-                .putInt("skin_selected_" + targetHero.name(), 1)
+                .putBoolean("skin_owned_" + targetHero.name() + "_" + skin.name(), true)
+                .putInt("skin_selected_" + targetHero.name(), selectedValue)
                 .apply();
-        showNotice(targetHero.title + ": скин куплен за 100 монет", 2000L);
+        showNotice(targetHero.title + ": «" + displayName + "» куплен за " + cost + " монет", 2200L);
     }
 
     private void showNotice(String notice, long durationMs) {
@@ -656,46 +707,55 @@ public final class GameView extends View implements Runnable {
         paint.setColor(0xD9060A0C);
         canvas.drawRect(0f, 0f, width, height, paint);
 
-        RectF panel = new RectF(width * 0.05f, height * 0.05f, width * 0.95f, height * 0.95f);
+        RectF panel = new RectF(width * 0.05f, height * 0.04f, width * 0.95f, height * 0.96f);
         drawPanel(canvas, panel, 0xFFFFC72C, 0xF01A1E22, width * 0.010f);
-        drawText(canvas, "МАГАЗИН СКИНОВ", width * 0.5f, height * 0.11f, width * 0.060f, Color.WHITE);
-        drawText(canvas, "Оригинальные костюмы по 100 монет", width * 0.5f, height * 0.145f, width * 0.030f, 0xFFFFD766);
-        drawText(canvas, "‹", width * 0.10f, height * 0.11f, width * 0.10f, Color.WHITE);
-        drawCoinBadge(canvas, width * 0.82f, height * 0.11f, true);
+        drawText(canvas, "МАГАЗИН СКИНОВ", width * 0.5f, height * 0.095f, width * 0.055f, Color.WHITE);
+        drawText(canvas, "Оригинальные — 100 • Весёлые — 200 монет", width * 0.5f, height * 0.132f, width * 0.027f, 0xFFFFD766);
+        drawText(canvas, "‹", width * 0.10f, height * 0.10f, width * 0.10f, Color.WHITE);
+        drawCoinBadge(canvas, width * 0.82f, height * 0.10f, true);
 
-        float top = height * 0.18f;
-        float cardH = height * 0.20f;
-        float gap = height * 0.024f;
+        float top = height * 0.16f;
+        float cardH = height * 0.225f;
+        float gap = height * 0.018f;
         for (int i = 0; i < shopHeroes.length; i++) {
             Hero itemHero = shopHeroes[i];
             RectF card = shopCardRects[i];
-            card.set(width * 0.08f, top + i * (cardH + gap), width * 0.92f, top + i * (cardH + gap) + cardH);
+            card.set(width * 0.075f, top + i * (cardH + gap), width * 0.925f, top + i * (cardH + gap) + cardH);
             drawShopCard(canvas, card, itemHero, i);
         }
 
-        drawText(canvas, "Монеты выдаются за успешные действия и пройденные уровни", width * 0.5f, height * 0.925f, width * 0.023f, 0xFFCFD4D8);
+        drawText(canvas, "Монеты выдаются за попадания и пройденные уровни", width * 0.5f, height * 0.935f, width * 0.022f, 0xFFCFD4D8);
         drawFloatingNotice(canvas);
     }
 
     private void drawShopCard(Canvas canvas, RectF rect, Hero itemHero, int index) {
-        drawPanel(canvas, rect, shopAccent(itemHero), 0xF7252A2E, width * 0.007f);
-        drawText(canvas, itemHero.title, rect.centerX(), rect.top + rect.height() * 0.20f, width * 0.035f, Color.WHITE);
-        drawText(canvas, "Скин: Оригинальная одежда", rect.centerX(), rect.top + rect.height() * 0.34f, width * 0.024f, 0xFFFFD766);
+        drawPanel(canvas, rect, shopAccent(itemHero), 0xF7252A2E, width * 0.006f);
+        drawText(canvas, itemHero.title, rect.centerX(), rect.top + rect.height() * 0.15f, width * 0.034f, Color.WHITE);
 
-        RectF preview = new RectF(rect.left + rect.width() * 0.03f, rect.top + rect.height() * 0.12f, rect.left + rect.width() * 0.28f, rect.bottom - rect.height() * 0.12f);
-        drawShopPreview(canvas, preview, itemHero);
+        RectF preview = new RectF(rect.left + rect.width() * 0.025f, rect.top + rect.height() * 0.16f, rect.left + rect.width() * 0.30f, rect.bottom - rect.height() * 0.06f);
+        drawShopPreview(canvas, preview, itemHero, Skin.FUN);
+        drawText(canvas, skinDisplayName(itemHero, Skin.FUN), preview.centerX(), rect.bottom - rect.height() * 0.03f, width * 0.020f, 0xFFFFD766);
 
-        boolean owned = isSkinOwned(itemHero, Skin.ORIGINAL);
-        boolean selected = selectedSkin(itemHero) == Skin.ORIGINAL;
-        String status = !owned ? "Цена: 100 монет" : (selected ? "Уже выбран" : "Куплен");
-        drawText(canvas, status, rect.centerX() + rect.width() * 0.13f, rect.top + rect.height() * 0.52f, width * 0.024f, owned ? 0xFFBFEA8F : 0xFFFFD766);
+        RectF originalButton = shopOriginalButtonRects[index];
+        originalButton.set(rect.left + rect.width() * 0.35f, rect.top + rect.height() * 0.28f, rect.right - rect.width() * 0.04f, rect.top + rect.height() * 0.52f);
+        drawSkinShopRow(canvas, itemHero, Skin.ORIGINAL, originalButton);
 
-        RectF button = shopButtonRects[index];
-        button.set(rect.left + rect.width() * 0.38f, rect.top + rect.height() * 0.60f, rect.right - rect.width() * 0.05f, rect.bottom - rect.height() * 0.14f);
+        RectF funButton = shopFunButtonRects[index];
+        funButton.set(rect.left + rect.width() * 0.35f, rect.top + rect.height() * 0.64f, rect.right - rect.width() * 0.04f, rect.top + rect.height() * 0.88f);
+        drawSkinShopRow(canvas, itemHero, Skin.FUN, funButton);
+    }
+
+    private void drawSkinShopRow(Canvas canvas, Hero itemHero, Skin skin, RectF button) {
+        boolean owned = isSkinOwned(itemHero, skin);
+        boolean selected = selectedSkin(itemHero) == skin;
+        int cost = skinCost(skin);
+        String name = skinDisplayName(itemHero, skin);
+        float labelY = button.top - width * 0.012f;
+        drawText(canvas, name, button.centerX(), labelY, width * 0.022f, skin == Skin.FUN ? 0xFFFFD766 : 0xFFDCE3E7);
         String label;
         boolean primary;
         if (!owned) {
-            label = "КУПИТЬ ЗА 100";
+            label = "КУПИТЬ ЗА " + cost;
             primary = true;
         } else if (!selected) {
             label = "ВЫБРАТЬ";
@@ -704,17 +764,30 @@ public final class GameView extends View implements Runnable {
             label = "ВЫБРАНО";
             primary = false;
         }
-        drawButton(canvas, button, label, primary);
+        drawCompactButton(canvas, button, label, primary, skin == Skin.FUN ? 0xFF8A4ED6 : 0xFF55A82D);
     }
 
-    private void drawShopPreview(Canvas canvas, RectF rect, Hero itemHero) {
+    private void drawCompactButton(Canvas canvas, RectF rect, String label, boolean primary, int primaryColor) {
+        paint.setColor(primary ? primaryColor : 0xFF2A3035);
+        canvas.drawRoundRect(rect, width * 0.018f, width * 0.018f, paint);
+        stroke.setStrokeWidth(width * 0.005f);
+        stroke.setColor(primary ? 0xFFD8F0A0 : 0xFF767E84);
+        canvas.drawRoundRect(rect, width * 0.018f, width * 0.018f, stroke);
+        drawText(canvas, label, rect.centerX(), rect.centerY() + width * 0.011f, width * 0.027f, Color.WHITE);
+    }
+
+    private void drawShopPreview(Canvas canvas, RectF rect, Hero itemHero, Skin skin) {
         canvas.save();
         canvas.translate(rect.centerX(), rect.centerY() + rect.height() * 0.10f);
-        float s = rect.height() * 0.32f;
+        float s = rect.height() * 0.31f;
         paint.setColor(0x66000000);
         canvas.drawOval(new RectF(-s * 0.65f, s * 1.10f, s * 0.65f, s * 1.35f), paint);
 
-        paint.setColor(itemHero == Hero.RAK ? 0xFFE46C20 : 0xFF38493E);
+        if (skin == Skin.FUN && itemHero == Hero.RAK) {
+            drawCape(canvas, s);
+        }
+
+        paint.setColor(heroLegColor(itemHero, skin));
         canvas.drawRoundRect(new RectF(-s * 0.34f, s * 0.48f, -s * 0.05f, s * 0.98f), s * 0.10f, s * 0.10f, paint);
         canvas.drawRoundRect(new RectF(s * 0.05f, s * 0.48f, s * 0.34f, s * 0.98f), s * 0.10f, s * 0.10f, paint);
         paint.setColor(0xFF171A1D);
@@ -727,12 +800,12 @@ public final class GameView extends View implements Runnable {
         torso.lineTo(s * 0.39f, s * 0.58f);
         torso.quadTo(s * 0.52f, s * 0.10f, s * 0.42f, -s * 0.20f);
         torso.close();
-        paint.setColor(heroBodyColor(itemHero, Skin.ORIGINAL));
+        paint.setColor(heroBodyColor(itemHero, skin));
         canvas.drawPath(torso, paint);
         stroke.setStrokeWidth(s * 0.035f);
         stroke.setColor(0xCC111317);
         canvas.drawPath(torso, stroke);
-        drawSuitDetails(canvas, s, itemHero, Skin.ORIGINAL);
+        drawSuitDetails(canvas, s, itemHero, skin);
 
         Bitmap head = headForHero(itemHero);
         if (head != null) {
@@ -740,6 +813,9 @@ public final class GameView extends View implements Runnable {
             float headW = headH * head.getWidth() / (float) head.getHeight();
             RectF headDst = new RectF(-headW * 0.5f, -s * 0.92f, headW * 0.5f, -s * 0.92f + headH);
             drawHeadBitmap(canvas, head, headDst, itemHero != Hero.RAK);
+        }
+        if (skin == Skin.FUN) {
+            drawFunAccessories(canvas, s, itemHero);
         }
         canvas.restore();
     }
@@ -761,13 +837,18 @@ public final class GameView extends View implements Runnable {
     private void drawGame(Canvas canvas) {
         drawBackground(canvas);
         drawHud(canvas);
-        drawObjects(canvas);
-        drawCharacter(canvas);
-        if (hero == Hero.KOROLEV && actionTimer > 0f) {
-            drawWaterStream(canvas);
+
+        if (screen == Screen.LEVEL_OUTRO) {
+            drawLevelOutro(canvas);
+        } else {
+            drawObjects(canvas);
+            drawCharacter(canvas);
+            if (hero == Hero.KOROLEV && actionTimer > 0f) {
+                drawWaterStream(canvas);
+            }
+            drawSparks(canvas);
+            drawHint(canvas);
         }
-        drawSparks(canvas);
-        drawHint(canvas);
 
         if (successFlash > 0f) {
             paint.setColor(0x22FFFFFF);
@@ -782,8 +863,6 @@ public final class GameView extends View implements Runnable {
             drawCountdown(canvas);
         } else if (screen == Screen.PAUSED) {
             drawOverlay(canvas, "ПАУЗА", "Игра остановлена", "ПРОДОЛЖИТЬ", "В МЕНЮ");
-        } else if (screen == Screen.LEVEL_DONE) {
-            drawOverlay(canvas, "УРОВЕНЬ " + level + " ПРОЙДЕН", "Очки: " + score + " • Монеты: " + coins, "СЛЕДУЮЩИЙ", "В МЕНЮ");
         } else if (screen == Screen.GAME_OVER) {
             drawOverlay(canvas, "ИГРА ОКОНЧЕНА", "Результат: " + score + " • Монеты: " + coins, "ЗАНОВО", "В МЕНЮ");
         } else if (screen == Screen.VICTORY) {
@@ -891,17 +970,23 @@ public final class GameView extends View implements Runnable {
         float activity = hero == Hero.LOZHKIN ? 1f : Math.min(1f, actionTimer / 0.22f);
         float x = width * 0.5f + side * width * 0.14f * activity;
         float y = height * 0.755f + vertical * height * 0.020f * activity + (float) Math.sin(worldTime * 3.2f) * height * 0.004f;
-        float s = width * 0.23f;
-        Skin skin = selectedSkin();
+        drawCharacterAt(canvas, x, y, width * 0.23f, side * vertical * 3.5f * activity, side, vertical, activity, true);
+    }
 
+    private void drawCharacterAt(Canvas canvas, float x, float y, float s, float rotation, float side, float vertical, float activity, boolean drawTool) {
+        Skin skin = selectedSkin();
         canvas.save();
         canvas.translate(x, y);
-        canvas.rotate(side * vertical * 3.5f * activity);
+        canvas.rotate(rotation);
 
         paint.setColor(0x66000000);
         canvas.drawOval(new RectF(-s * 0.52f, s * 0.85f, s * 0.52f, s * 1.10f), paint);
 
-        paint.setColor(hero == Hero.RAK ? 0xFFE46C20 : 0xFF34453A);
+        if (skin == Skin.FUN && hero == Hero.RAK) {
+            drawCape(canvas, s);
+        }
+
+        paint.setColor(heroLegColor(hero, skin));
         canvas.drawRoundRect(new RectF(-s * 0.34f, s * 0.48f, -s * 0.05f, s * 0.96f), s * 0.10f, s * 0.10f, paint);
         canvas.drawRoundRect(new RectF(s * 0.05f, s * 0.48f, s * 0.34f, s * 0.96f), s * 0.10f, s * 0.10f, paint);
         paint.setColor(0xFF171A1D);
@@ -929,8 +1014,11 @@ public final class GameView extends View implements Runnable {
             RectF headDst = new RectF(-headW * 0.5f, -s * 0.89f, headW * 0.5f, -s * 0.89f + headH);
             drawHeadBitmap(canvas, head, headDst, hero != Hero.RAK);
         }
+        if (skin == Skin.FUN) {
+            drawFunAccessories(canvas, s, hero);
+        }
 
-        drawArmsAndTool(canvas, s, side, vertical, activity);
+        drawArmsAndTool(canvas, s, side, vertical, activity, drawTool);
         canvas.restore();
     }
 
@@ -951,6 +1039,10 @@ public final class GameView extends View implements Runnable {
     }
 
     private void drawSuitDetails(Canvas canvas, float s, Hero targetHero, Skin skin) {
+        if (skin == Skin.FUN) {
+            drawFunSuitDetails(canvas, s, targetHero);
+            return;
+        }
         if (skin == Skin.ORIGINAL) {
             drawOriginalSuitDetails(canvas, s, targetHero);
             return;
@@ -1023,12 +1115,112 @@ public final class GameView extends View implements Runnable {
         }
     }
 
+    private void drawFunSuitDetails(Canvas canvas, float s, Hero targetHero) {
+        if (targetHero == Hero.LOZHKIN) {
+            paint.setColor(0xFFFFFFFF);
+            canvas.drawRoundRect(new RectF(-s * 0.43f, -s * 0.18f, s * 0.43f, -s * 0.05f), s * 0.06f, s * 0.06f, paint);
+            canvas.drawRoundRect(new RectF(-s * 0.09f, -s * 0.17f, s * 0.09f, s * 0.56f), s * 0.03f, s * 0.03f, paint);
+            paint.setColor(0xFF176A3B);
+            canvas.drawRect(-s * 0.42f, s * 0.28f, s * 0.42f, s * 0.39f, paint);
+            paint.setColor(0xFFFFD12A);
+            canvas.drawRoundRect(new RectF(-s * 0.11f, s * 0.27f, s * 0.11f, s * 0.40f), s * 0.02f, s * 0.02f, paint);
+            paint.setColor(0x66FFFFFF);
+            for (int i = 0; i < 7; i++) {
+                float px = -s * 0.30f + randomPattern(i + 30) * s * 0.60f;
+                float py = -s * 0.02f + randomPattern(i + 40) * s * 0.45f;
+                canvas.drawCircle(px, py, s * 0.045f, paint);
+            }
+        } else if (targetHero == Hero.RAK) {
+            paint.setColor(0xFFFFD12A);
+            Path star = new Path();
+            for (int i = 0; i < 10; i++) {
+                double a = -Math.PI / 2.0 + i * Math.PI / 5.0;
+                float r = (i % 2 == 0 ? s * 0.17f : s * 0.075f);
+                float x = (float) Math.cos(a) * r;
+                float y = s * 0.10f + (float) Math.sin(a) * r;
+                if (i == 0) {
+                    star.moveTo(x, y);
+                } else {
+                    star.lineTo(x, y);
+                }
+            }
+            star.close();
+            canvas.drawPath(star, paint);
+            paint.setColor(0xFFE64242);
+            canvas.drawRect(-s * 0.42f, s * 0.35f, s * 0.42f, s * 0.46f, paint);
+            paint.setColor(0xFFFFD12A);
+            canvas.drawRoundRect(new RectF(-s * 0.12f, s * 0.33f, s * 0.12f, s * 0.48f), s * 0.03f, s * 0.03f, paint);
+        } else {
+            paint.setColor(0xFFFFD34D);
+            for (int i = 0; i < 8; i++) {
+                float px = -s * 0.31f + randomPattern(i + 50) * s * 0.62f;
+                float py = -s * 0.07f + randomPattern(i + 61) * s * 0.48f;
+                drawFlower(canvas, px, py, s * 0.055f, i % 2 == 0 ? 0xFFFF6B5D : 0xFFFFC93A);
+            }
+            paint.setColor(0xFF143A63);
+            canvas.drawRoundRect(new RectF(-s * 0.42f, s * 0.32f, s * 0.42f, s * 0.43f), s * 0.04f, s * 0.04f, paint);
+        }
+    }
+
+    private void drawFlower(Canvas canvas, float x, float y, float r, int color) {
+        paint.setColor(color);
+        canvas.drawCircle(x - r, y, r * 0.72f, paint);
+        canvas.drawCircle(x + r, y, r * 0.72f, paint);
+        canvas.drawCircle(x, y - r, r * 0.72f, paint);
+        canvas.drawCircle(x, y + r, r * 0.72f, paint);
+        paint.setColor(0xFFFFF1A6);
+        canvas.drawCircle(x, y, r * 0.45f, paint);
+    }
+
+    private void drawCape(Canvas canvas, float s) {
+        Path cape = new Path();
+        cape.moveTo(-s * 0.34f, -s * 0.15f);
+        cape.lineTo(-s * 0.58f, s * 0.58f);
+        cape.quadTo(0f, s * 0.78f, s * 0.58f, s * 0.58f);
+        cape.lineTo(s * 0.34f, -s * 0.15f);
+        cape.close();
+        paint.setColor(0xFFD83E3E);
+        canvas.drawPath(cape, paint);
+        stroke.setStrokeWidth(s * 0.025f);
+        stroke.setColor(0xFF7D1C28);
+        canvas.drawPath(cape, stroke);
+    }
+
+    private void drawFunAccessories(Canvas canvas, float s, Hero targetHero) {
+        if (targetHero == Hero.LOZHKIN) {
+            Path hat = new Path();
+            hat.moveTo(-s * 0.36f, -s * 0.72f);
+            hat.quadTo(0f, -s * 1.34f, s * 0.34f, -s * 0.74f);
+            hat.lineTo(s * 0.14f, -s * 0.67f);
+            hat.quadTo(0f, -s * 0.88f, -s * 0.26f, -s * 0.66f);
+            hat.close();
+            paint.setColor(0xFFE33B3B);
+            canvas.drawPath(hat, paint);
+            paint.setColor(Color.WHITE);
+            canvas.drawRoundRect(new RectF(-s * 0.39f, -s * 0.78f, s * 0.37f, -s * 0.64f), s * 0.06f, s * 0.06f, paint);
+            canvas.drawCircle(s * 0.34f, -s * 0.75f, s * 0.10f, paint);
+        } else if (targetHero == Hero.RAK) {
+            paint.setColor(0xBB3A2C84);
+            canvas.drawRoundRect(new RectF(-s * 0.29f, -s * 0.60f, s * 0.29f, -s * 0.47f), s * 0.06f, s * 0.06f, paint);
+            paint.setColor(0xFFEDF8FF);
+            canvas.drawCircle(-s * 0.13f, -s * 0.535f, s * 0.035f, paint);
+            canvas.drawCircle(s * 0.13f, -s * 0.535f, s * 0.035f, paint);
+        } else {
+            paint.setColor(0xEE14171A);
+            canvas.drawRoundRect(new RectF(-s * 0.31f, -s * 0.61f, -s * 0.02f, -s * 0.48f), s * 0.04f, s * 0.04f, paint);
+            canvas.drawRoundRect(new RectF(s * 0.02f, -s * 0.61f, s * 0.31f, -s * 0.48f), s * 0.04f, s * 0.04f, paint);
+            stroke.setStrokeWidth(s * 0.035f);
+            stroke.setColor(0xFF14171A);
+            canvas.drawLine(-s * 0.02f, -s * 0.55f, s * 0.02f, -s * 0.55f, stroke);
+        }
+    }
+
     private float randomPattern(int seed) {
         int value = (seed * 73 + 19) % 97;
         return value / 97f;
     }
 
-    private void drawArmsAndTool(Canvas canvas, float s, float side, float vertical, float activity) {
+    private void drawArmsAndTool(Canvas canvas, float s, float side, float vertical, float activity, boolean showTool) {
         float targetX = side * s * (0.66f + activity * 0.18f);
         float targetY = s * (0.08f + vertical * 0.22f * activity);
         stroke.setStrokeWidth(s * 0.20f);
@@ -1040,11 +1232,11 @@ public final class GameView extends View implements Runnable {
         canvas.drawLine(-s * 0.28f, -s * 0.03f, targetX * 0.72f, targetY, stroke);
         canvas.drawLine(s * 0.28f, -s * 0.03f, targetX * 0.82f, targetY + s * 0.12f, stroke);
 
-        if (hero == Hero.RAK) {
+        if (hero == Hero.RAK && showTool) {
             float logX = targetX * (0.70f + 0.30f * activity);
             float logY = targetY - s * 0.03f;
             drawLog(canvas, logX, logY, s * 0.30f, side * -18f);
-        } else if (hero == Hero.KOROLEV) {
+        } else if (hero == Hero.KOROLEV && showTool) {
             stroke.setStrokeWidth(s * 0.10f);
             stroke.setColor(0xFF252B30);
             canvas.drawLine(-s * 0.15f, s * 0.05f, targetX, targetY, stroke);
@@ -1069,6 +1261,117 @@ public final class GameView extends View implements Runnable {
         stroke.setStrokeWidth(width * 0.008f);
         stroke.setColor(0xFFE6FAFF);
         canvas.drawLine(startX, startY, target.x, target.y, stroke);
+    }
+
+    private void drawLevelOutro(Canvas canvas) {
+        float t = clamp01((SystemClock.uptimeMillis() - levelOutroStartMs) / (float) LEVEL_OUTRO_DURATION_MS);
+        paint.setColor(0x66000000);
+        canvas.drawRoundRect(new RectF(width * 0.10f, height * 0.22f, width * 0.90f, height * 0.31f), width * 0.025f, width * 0.025f, paint);
+        drawText(canvas, "УРОВЕНЬ " + level + " ПРОЙДЕН!", width * 0.5f, height * 0.275f, width * 0.054f, heroAccent());
+
+        if (hero == Hero.LOZHKIN) {
+            drawLozhkinOutro(canvas, t);
+        } else if (hero == Hero.RAK) {
+            drawRakOutro(canvas, t);
+        } else {
+            drawKorolevOutro(canvas, t);
+        }
+
+        String next = level >= MAX_LEVEL ? "ФИНАЛ!" : "СЛЕДУЮЩИЙ УРОВЕНЬ...";
+        drawText(canvas, next, width * 0.5f, height * 0.90f, width * 0.033f, Color.WHITE);
+
+        float fade = smooth(clamp01((t - 0.84f) / 0.16f));
+        if (fade > 0f) {
+            paint.setColor(((int) (fade * 255f) << 24));
+            canvas.drawRect(0f, 0f, width, height, paint);
+        }
+    }
+
+    private void drawLozhkinOutro(Canvas canvas, float t) {
+        float drink = smooth(clamp01(t / 0.38f));
+        float fall = smooth(clamp01((t - 0.42f) / 0.38f));
+        float x = width * 0.50f + width * 0.12f * fall;
+        float y = height * 0.70f + height * 0.11f * fall;
+        float rotation = 82f * fall;
+        drawCharacterAt(canvas, x, y, width * 0.25f, rotation, 1f, -1f, 0.20f, false);
+
+        float bottleX = width * (0.62f - 0.085f * drink + 0.08f * fall);
+        float bottleY = height * (0.70f - 0.17f * drink + 0.10f * fall);
+        float bottleRotation = -58f - 35f * drink + 95f * fall;
+        drawBottle(canvas, bottleX, bottleY, width * 0.034f, bottleRotation, false);
+
+        if (t > 0.43f) {
+            float wobble = (float) Math.sin((t - 0.43f) * 35f);
+            drawText(canvas, wobble > 0f ? "ОЙ..." : "УХ!", width * 0.44f, height * 0.48f, width * 0.050f, 0xFFFFE27A);
+        } else {
+            drawText(canvas, "ЗА УРОВЕНЬ!", width * 0.5f, height * 0.44f, width * 0.046f, 0xFFFFE27A);
+        }
+    }
+
+    private void drawRakOutro(Canvas canvas, float t) {
+        float windup = smooth(clamp01(t / 0.24f));
+        float throwPhase = smooth(clamp01((t - 0.23f) / 0.48f));
+        float bob = (float) Math.sin(t * 25f) * height * 0.006f;
+        drawCharacterAt(canvas, width * 0.46f, height * 0.72f + bob, width * 0.25f, -10f * windup + 14f * throwPhase, 1f, -1f, 1f, false);
+
+        float startX = width * 0.61f;
+        float startY = height * 0.68f;
+        float endX = width * 0.50f;
+        float endY = height * 0.48f;
+        float logX = startX + (endX - startX) * throwPhase;
+        float logY = startY + (endY - startY) * throwPhase;
+        float logSize = width * (0.055f + 0.33f * throwPhase);
+        drawLog(canvas, logX, logY, logSize, -20f + 400f * throwPhase);
+
+        if (throwPhase > 0.78f) {
+            float impact = clamp01((throwPhase - 0.78f) / 0.22f);
+            stroke.setStrokeWidth(width * 0.018f * (1f - impact));
+            stroke.setColor(((int) ((1f - impact) * 230f) << 24) | 0x00FFD441);
+            canvas.drawCircle(width * 0.5f, height * 0.48f, width * (0.08f + impact * 0.22f), stroke);
+            paint.setColor(((int) ((1f - impact) * 110f) << 24) | 0x00FFFFFF);
+            canvas.drawRect(0f, 0f, width, height, paint);
+        }
+        drawText(canvas, "ЛОВИ ПОЛЕНО!", width * 0.5f, height * 0.40f, width * 0.047f, 0xFFFFD766);
+    }
+
+    private void drawKorolevOutro(Canvas canvas, float t) {
+        float sway = (float) Math.sin(t * 22f);
+        float x = width * 0.48f + sway * width * 0.025f;
+        float y = height * 0.72f - Math.abs(sway) * height * 0.012f;
+        drawCharacterAt(canvas, x, y, width * 0.25f, sway * 5f, 1f, -1f, 1f, true);
+
+        float startX = x + width * 0.17f;
+        float startY = y - height * 0.01f;
+        for (int i = 0; i < 5; i++) {
+            float wave = (float) Math.sin(t * 18f + i * 0.9f);
+            float endX = width * (0.15f + i * 0.18f);
+            float endY = height * (0.37f + wave * 0.07f);
+            stroke.setStrokeWidth(width * (0.010f + i * 0.0015f));
+            stroke.setColor(0xB65CD4FF);
+            canvas.drawLine(startX, startY, endX, endY, stroke);
+            stroke.setStrokeWidth(width * 0.0035f);
+            stroke.setColor(0xFFE9FCFF);
+            canvas.drawLine(startX, startY, endX, endY, stroke);
+            paint.setColor(0xCC9BEAFF);
+            canvas.drawCircle(endX, endY, width * 0.010f, paint);
+        }
+        for (int i = 0; i < 12; i++) {
+            float a = t * 5f + i * 0.55f;
+            float dropX = width * 0.5f + (float) Math.cos(a) * width * (0.20f + (i % 3) * 0.04f);
+            float dropY = height * 0.48f + (float) Math.sin(a * 1.3f) * height * 0.15f;
+            paint.setColor(0xAA7BDFFF);
+            canvas.drawCircle(dropX, dropY, width * 0.007f, paint);
+        }
+        drawText(canvas, "ВОДЫ НЕ ЖАЛЕТЬ!", width * 0.5f, height * 0.40f, width * 0.046f, 0xFFA8ECFF);
+    }
+
+    private float clamp01(float value) {
+        return Math.max(0f, Math.min(1f, value));
+    }
+
+    private float smooth(float value) {
+        float v = clamp01(value);
+        return v * v * (3f - 2f * v);
     }
 
     private void drawCountdown(Canvas canvas) {
@@ -1303,6 +1606,15 @@ public final class GameView extends View implements Runnable {
     }
 
     private int heroBodyColor(Hero targetHero, Skin skin) {
+        if (skin == Skin.FUN) {
+            if (targetHero == Hero.LOZHKIN) {
+                return 0xFFD93C3C;
+            }
+            if (targetHero == Hero.RAK) {
+                return 0xFF315BC7;
+            }
+            return 0xFF18A8A0;
+        }
         if (targetHero == Hero.RAK) {
             return skin == Skin.ORIGINAL ? 0xFFF2CD37 : 0xFFF0C42C;
         }
@@ -1310,6 +1622,19 @@ public final class GameView extends View implements Runnable {
             return skin == Skin.ORIGINAL ? 0xFF5E6F57 : 0xFF53624E;
         }
         return skin == Skin.ORIGINAL ? 0xFF657A55 : 0xFF59704C;
+    }
+
+    private int heroLegColor(Hero targetHero, Skin skin) {
+        if (skin == Skin.FUN) {
+            if (targetHero == Hero.LOZHKIN) {
+                return 0xFF176A3B;
+            }
+            if (targetHero == Hero.RAK) {
+                return 0xFF263E91;
+            }
+            return 0xFFFFC928;
+        }
+        return targetHero == Hero.RAK ? 0xFFE46C20 : 0xFF34453A;
     }
 
     private int heroAccent() {
@@ -1376,10 +1701,10 @@ public final class GameView extends View implements Runnable {
             handleShopTouch(x, y);
             return true;
         }
-        if (screen == Screen.COUNTDOWN) {
+        if (screen == Screen.COUNTDOWN || screen == Screen.LEVEL_OUTRO) {
             return true;
         }
-        if (screen == Screen.PAUSED || screen == Screen.LEVEL_DONE || screen == Screen.GAME_OVER || screen == Screen.VICTORY) {
+        if (screen == Screen.PAUSED || screen == Screen.GAME_OVER || screen == Screen.VICTORY) {
             handleOverlayTouch(x, y);
             return true;
         }
@@ -1431,9 +1756,13 @@ public final class GameView extends View implements Runnable {
             goToMenu();
             return;
         }
-        for (int i = 0; i < shopButtonRects.length; i++) {
-            if (shopButtonRects[i].contains(x, y)) {
-                buyOrSelectOriginalSkin(shopHeroes[i]);
+        for (int i = 0; i < shopHeroes.length; i++) {
+            if (shopOriginalButtonRects[i].contains(x, y)) {
+                buyOrSelectSkin(shopHeroes[i], Skin.ORIGINAL);
+                return;
+            }
+            if (shopFunButtonRects[i].contains(x, y)) {
+                buyOrSelectSkin(shopHeroes[i], Skin.FUN);
                 return;
             }
         }
@@ -1444,8 +1773,6 @@ public final class GameView extends View implements Runnable {
             if (screen == Screen.PAUSED) {
                 screen = Screen.PLAYING;
                 lastSpawnMs = SystemClock.uptimeMillis();
-            } else if (screen == Screen.LEVEL_DONE) {
-                nextLevel();
             } else {
                 retryHero();
             }
