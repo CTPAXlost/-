@@ -21,6 +21,7 @@ import android.os.Build;
 import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
@@ -34,6 +35,8 @@ import java.util.Locale;
 import java.util.Random;
 
 public final class GameView extends View implements Runnable {
+
+    private static final String TAG = "ELC_RUNTIME";
 
     private enum Screen {
         MENU,
@@ -135,7 +138,7 @@ public final class GameView extends View implements Runnable {
         text.setTextAlign(Paint.Align.CENTER);
         smallText.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         smallText.setTextAlign(Paint.Align.CENTER);
-
+        Log.i(TAG, "INIT_OK version=1.1.1");
     }
 
     private void ensureMenuBitmap() {
@@ -172,6 +175,7 @@ public final class GameView extends View implements Runnable {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        Log.i(TAG, "SCREEN_MENU");
         startLoop();
     }
 
@@ -425,6 +429,7 @@ public final class GameView extends View implements Runnable {
         actionEffects.clear();
         screen = Screen.READY;
         dialog = Dialog.NONE;
+        Log.i(TAG, "READY_" + selectedHero.name());
         softTone(ToneGenerator.TONE_PROP_ACK, 100);
     }
 
@@ -434,6 +439,7 @@ public final class GameView extends View implements Runnable {
         particles.clear();
         actionEffects.clear();
         screen = Screen.PLAYING;
+        Log.i(TAG, "PLAYING_" + hero.name());
         lastFrameTime = SystemClock.uptimeMillis();
         lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 350;
         softTone(ToneGenerator.TONE_PROP_ACK, 90);
@@ -449,6 +455,7 @@ public final class GameView extends View implements Runnable {
         particles.clear();
         actionEffects.clear();
         screen = Screen.PLAYING;
+        Log.i(TAG, "PLAYING_" + hero.name() + " LEVEL_" + level);
         lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 420;
         softTone(ToneGenerator.TONE_PROP_ACK, 100);
     }
@@ -465,6 +472,7 @@ public final class GameView extends View implements Runnable {
         prompts.clear();
         particles.clear();
         actionEffects.clear();
+        Log.i(TAG, "SCREEN_MENU");
     }
 
     private int targetForLevel() {
@@ -749,6 +757,7 @@ public final class GameView extends View implements Runnable {
     }
 
     private void recoverFromRuntimeError(RuntimeException runtimeException) {
+        Log.e(TAG, "RECOVERED_RUNTIME_ERROR", runtimeException);
         movingItems.clear();
         prompts.clear();
         particles.clear();
@@ -939,7 +948,7 @@ public final class GameView extends View implements Runnable {
                 lines.add("Алик: нажимай на сторону, где появился котёл, чтобы бросить полено.");
                 lines.add("Андрей: нажимай на сторону с огнём, чтобы направить струю воды.");
                 lines.add("У каждого героя 10 уровней. Три промаха — проигрыш.");
-                lines.add("Версия игры: 1.1.0");
+                lines.add("Версия игры: 1.1.1");
                 break;
             case RECORDS:
                 title = "РЕКОРДЫ";

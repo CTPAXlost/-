@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -13,6 +14,7 @@ import android.view.WindowManager;
 import android.widget.TextView;
 
 public final class MainActivity extends Activity {
+    private static final String TAG = "ELC_RUNTIME";
     private GameView gameView;
 
     @Override
@@ -25,6 +27,7 @@ public final class MainActivity extends Activity {
             gameView = new GameView(this);
             setContentView(gameView);
         } catch (RuntimeException runtimeException) {
+            Log.e(TAG, "STARTUP_ERROR", runtimeException);
             showStartupError();
         }
     }
@@ -36,7 +39,7 @@ public final class MainActivity extends Activity {
         error.setGravity(Gravity.CENTER);
         error.setTextSize(22f);
         error.setPadding(48, 48, 48, 48);
-        error.setText("ЕЛЦ\n\nНе удалось запустить игровой экран.\nПерезапусти приложение.\n\nВерсия 1.1.0");
+        error.setText("ЕЛЦ\n\nНе удалось запустить игровой экран.\nПерезапусти приложение.\n\nВерсия 1.1.1");
         setContentView(error);
     }
 
