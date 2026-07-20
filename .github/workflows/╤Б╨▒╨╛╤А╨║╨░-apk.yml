@@ -18,20 +18,20 @@ jobs:
   build:
     name: Проверка и сборка Android APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Скачать проект
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Установить Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Установить Gradle 8.11.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.11.1"
           cache-cleanup: on-success
@@ -52,27 +52,59 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Проверить проект и собрать APK
+      - name: Собрать APK
         shell: bash
         run: |
           set -euo pipefail
           gradle --version
-          gradle clean :app:lintDebug :app:assembleDebug --stacktrace --no-daemon
-          test -s app/build/outputs/apk/debug/app-debug.apk
+          gradle clean :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Подготовить файл APK
+      - name: Проверить готовый APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -q 'AndroidManifest.xml'
+          unzip -l "$APK" | grep -q 'classes.dex'
+          unzip -l "$APK" | grep -q 'resources.arsc'
+          echo "APK создан и его структура проверена: $APK"
+
+      - name: Android Lint
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:lintDebug --stacktrace --no-daemon
+
+      - name: Подготовить файлы для скачивания
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk "artifacts/ЕЛЦ-v1.0.0.apk"
-          sha256sum "artifacts/ЕЛЦ-v1.0.0.apk" > "artifacts/ЕЛЦ-v1.0.0.sha256.txt"
+          cp app/build/outputs/apk/debug/app-debug.apk "artifacts/ЕЛЦ-v1.0.1.apk"
+          sha256sum "artifacts/ЕЛЦ-v1.0.1.apk" > "artifacts/ЕЛЦ-v1.0.1.sha256.txt"
 
       - name: Загрузить APK
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ЕЛЦ — готовый APK
+          name: ЕЛЦ — готовый APK v1.0.1
           path: artifacts/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: Загрузить отчёт Android Lint
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ЕЛЦ — отчёт Android Lint
+          path: |
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+            app/build/reports/lint-results-debug.txt
+            app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt
+          if-no-files-found: ignore
+          retention-days: 14

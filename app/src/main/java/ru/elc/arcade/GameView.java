@@ -865,7 +865,14 @@ public final class GameView extends View implements Runnable {
                 title = "ЛОКАЛЬНЫЙ РЕЙТИНГ";
                 ArrayList<Hero> rating = new ArrayList<>();
                 Collections.addAll(rating, Hero.values());
-                rating.sort(Comparator.comparingInt((Hero h) -> preferences.getInt(scoreKey(h), 0)).reversed());
+                Collections.sort(rating, new Comparator<Hero>() {
+                    @Override
+                    public int compare(Hero first, Hero second) {
+                        int firstScore = preferences.getInt(scoreKey(first), 0);
+                        int secondScore = preferences.getInt(scoreKey(second), 0);
+                        return Integer.compare(secondScore, firstScore);
+                    }
+                });
                 for (int i = 0; i < rating.size(); i++) {
                     Hero h = rating.get(i);
                     lines.add((i + 1) + ". " + h.name + " — " + preferences.getInt(scoreKey(h), 0));
