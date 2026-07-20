@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: elc-v2-${{ github.ref }}
+  group: elc-v21-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -64,7 +64,7 @@ jobs:
           test -s app/src/main/res/drawable-nodpi/head_korolev.png
           test -s keystore/elc-development.jks
           bash -n scripts/smoke_test.sh
-          grep -q "versionName '2.0.0'" app/build.gradle
+          grep -q "versionName '2.1.0'" app/build.gradle
 
       - name: Собрать Debug и Release APK
         shell: bash
@@ -82,7 +82,7 @@ jobs:
           AAPT="${ANDROID_SDK_ROOT}/build-tools/35.0.0/aapt"
           "$AAPT" dump badging "$APK" | tee apk-badging.txt
           grep -q "package: name='ru.elc.arcade'" apk-badging.txt
-          grep -q "versionName='2.0.0'" apk-badging.txt
+          grep -q "versionName='2.1.0'" apk-badging.txt
           grep -q "launchable-activity: name='ru.elc.arcade.MainActivity'" apk-badging.txt
 
       - name: Разрешить аппаратное ускорение эмулятора
@@ -109,13 +109,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/apk
-          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v2.0.0.apk"
-          sha256sum "artifacts/apk/ЕЛЦ-v2.0.0.apk" > "artifacts/apk/ЕЛЦ-v2.0.0.sha256.txt"
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v2.1.0.apk"
+          sha256sum "artifacts/apk/ЕЛЦ-v2.1.0.apk" > "artifacts/apk/ЕЛЦ-v2.1.0.sha256.txt"
 
       - name: Загрузить проверенный APK
         uses: actions/upload-artifact@v4
         with:
-          name: ЕЛЦ — проверенный APK v2.0.0
+          name: ЕЛЦ — проверенный APK v2.1.0
           path: artifacts/apk/*
           if-no-files-found: error
           retention-days: 30
@@ -124,7 +124,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ЕЛЦ — проверка v2.0.0
+          name: ЕЛЦ — проверка v2.1.0
           path: |
             artifacts/runtime-test/*
             apk-badging.txt
