@@ -10,27 +10,16 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PointF;
-import android.graphics.RadialGradient;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
-import android.media.AudioManager;
-import android.media.ToneGenerator;
-import android.os.Build;
 import android.os.SystemClock;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
 import android.util.Log;
-import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 
@@ -40,95 +29,76 @@ public final class GameView extends View implements Runnable {
 
     private enum Screen {
         MENU,
-        READY,
+        COUNTDOWN,
         PLAYING,
         PAUSED,
-        LEVEL_COMPLETE,
+        LEVEL_DONE,
         GAME_OVER,
         VICTORY
     }
 
-    private enum Dialog {
-        NONE,
-        SETTINGS,
-        INFO,
-        RECORDS,
-        ACHIEVEMENTS,
-        RATING,
-        SHOP
-    }
-
     private enum Hero {
-        LOZHKIN("Александр Ложкин", "Ловит бутылки", 0),
-        RAK("Алик Рак", "Кидает поленья в котёл", 1),
-        KOROLEV("Андрей Королёв", "Тушит пожар", 2);
+        LOZHKIN("Александр Ложкин", "Ловит бутылки"),
+        RAK("Алик Рак", "Кидает поленья в котёл"),
+        KOROLEV("Андрей Королёв", "Тушит пожар");
 
-        final String name;
-        final String role;
-        final int index;
+        final String title;
+        final String task;
 
-        Hero(String name, String role, int index) {
-            this.name = name;
-            this.role = role;
-            this.index = index;
+        Hero(String title, String task) {
+            this.title = title;
+            this.task = task;
         }
     }
 
     private static final int MAX_LEVEL = 10;
-    private static final String PREFS = "elc_arcade_prefs";
-    private static final String KEY_SOUND = "sound";
-    private static final String KEY_VIBRATION = "vibration";
+    private static final String PREFS = "elc_v2";
 
-    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint smallText = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Random random = new Random();
+    private final ArrayList<Bottle> bottles = new ArrayList<Bottle>();
+    private final ArrayList<Target> targets = new ArrayList<Target>();
+    private final ArrayList<Spark> sparks = new ArrayList<Spark>();
+    private final RectF menuRect = new RectF();
     private final SharedPreferences preferences;
-    private final Vibrator vibrator;
-    private final RectF menuDst = new RectF();
-    private final ArrayList<MovingItem> movingItems = new ArrayList<>();
-    private final ArrayList<PromptItem> prompts = new ArrayList<>();
-    private final ArrayList<Particle> particles = new ArrayList<>();
-    private final ArrayList<ActionEffect> actionEffects = new ArrayList<>();
 
     private Bitmap menuBitmap;
-    private ToneGenerator toneGenerator;
+    private Bitmap headLozhkin;
+    private Bitmap headRak;
+    private Bitmap headKorolev;
 
     private Screen screen = Screen.MENU;
-    private Dialog dialog = Dialog.NONE;
     private Hero hero = Hero.LOZHKIN;
-
-    private boolean loopRunning;
+    private boolean loopActive;
     private boolean hostPaused;
-    private boolean soundEnabled;
-    private boolean vibrationEnabled;
 
-    private long lastFrameTime;
-    private long lastSpawnTime;
-    private long flashUntil;
-    private long wrongUntil;
+    private float width;
+    private float height;
+    private long lastFrameMs;
+    private long lastSpawnMs;
+    private long countdownStartMs;
+    private float worldTime;
 
     private int level = 1;
     private int score;
     private int lives = 3;
     private int progress;
     private int selectedLane = 3;
-
-    private float width;
-    private float height;
-    private float density;
+    private int actionLane = 3;
+    private float actionTimer;
+    private float missFlash;
+    private float successFlash;
+    private String menuNotice = "";
+    private long menuNoticeUntil;
+    private String accessibilityState = "";
 
     public GameView(Context context) {
         super(context);
         setFocusable(true);
         setKeepScreenOn(true);
-        density = getResources().getDisplayMetrics().density;
-        menuBitmap = decodeMenuBitmap();
         preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        soundEnabled = preferences.getBoolean(KEY_SOUND, true);
-        vibrationEnabled = preferences.getBoolean(KEY_VIBRATION, true);
-        vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
 
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.ROUND);
@@ -136,112 +106,67 @@ public final class GameView extends View implements Runnable {
 
         text.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         text.setTextAlign(Paint.Align.CENTER);
-        smallText.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
-        smallText.setTextAlign(Paint.Align.CENTER);
-        Log.i(TAG, "INIT_OK version=1.2.0");
+        setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+
+        loadSmallAssets();
+        updateAccessibilityState();
     }
 
-    private Bitmap decodeMenuBitmap() {
-        try {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inScaled = false;
-            options.inPreferredConfig = Bitmap.Config.RGB_565;
-            return BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc, options);
-        } catch (RuntimeException runtimeException) {
-            Log.e(TAG, "MENU_BITMAP_ERROR", runtimeException);
-            return null;
-        } catch (OutOfMemoryError outOfMemoryError) {
-            Log.e(TAG, "MENU_BITMAP_OOM", outOfMemoryError);
-            return null;
-        }
+    private void loadSmallAssets() {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inScaled = false;
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        headLozhkin = BitmapFactory.decodeResource(getResources(), R.drawable.head_lozhkin, options);
+        headRak = BitmapFactory.decodeResource(getResources(), R.drawable.head_rak, options);
+        headKorolev = BitmapFactory.decodeResource(getResources(), R.drawable.head_korolev, options);
     }
 
     private void ensureMenuBitmap() {
         if (menuBitmap == null || menuBitmap.isRecycled()) {
-            menuBitmap = decodeMenuBitmap();
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inScaled = false;
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            menuBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.menu_elc, options);
         }
     }
 
-    private void createToneGenerator() {
-        if (!soundEnabled || toneGenerator != null) {
-            return;
+    private void releaseMenuBitmap() {
+        if (menuBitmap != null && !menuBitmap.isRecycled()) {
+            menuBitmap.recycle();
         }
-        try {
-            toneGenerator = new ToneGenerator(AudioManager.STREAM_MUSIC, 52);
-        } catch (RuntimeException ignored) {
-            toneGenerator = null;
-        }
-    }
-
-    private void releaseToneGenerator() {
-        if (toneGenerator != null) {
-            try {
-                toneGenerator.release();
-            } catch (RuntimeException ignored) {
-                // Some devices throw while audio service is restarting.
-            }
-            toneGenerator = null;
-        }
+        menuBitmap = null;
     }
 
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        Log.i(TAG, "SCREEN_MENU");
-        startLoop();
+        resumeGameLoop();
     }
 
     @Override
     protected void onDetachedFromWindow() {
-        loopRunning = false;
+        loopActive = false;
         removeCallbacks(this);
-        releaseToneGenerator();
         super.onDetachedFromWindow();
     }
 
-    public void onHostPause() {
+    public void resumeGameLoop() {
+        hostPaused = false;
+        if (!loopActive) {
+            loopActive = true;
+            lastFrameMs = SystemClock.uptimeMillis();
+            postOnAnimation(this);
+        }
+    }
+
+    public void pauseGameLoop() {
         hostPaused = true;
         if (screen == Screen.PLAYING) {
             screen = Screen.PAUSED;
         }
     }
 
-    public void onHostResume() {
-        hostPaused = false;
-        ensureMenuBitmap();
-        if (soundEnabled) {
-            createToneGenerator();
-        }
-        startLoop();
-    }
-
-    void runSmokeCommand(String rawCommand) {
-        String command = rawCommand == null ? "" : rawCommand.trim().toLowerCase(Locale.ROOT);
-        if ("menu".equals(command)) {
-            goToMenu();
-        } else if ("lozhkin".equals(command)) {
-            startHero(Hero.LOZHKIN);
-            beginPlaying();
-        } else if ("rak".equals(command)) {
-            startHero(Hero.RAK);
-            beginPlaying();
-        } else if ("korolev".equals(command)) {
-            startHero(Hero.KOROLEV);
-            beginPlaying();
-        } else {
-            Log.e(TAG, "UNKNOWN_SMOKE_COMMAND " + rawCommand);
-            return;
-        }
-        Log.i(TAG, "SMOKE_COMMAND_OK " + command);
-        invalidate();
-    }
-
-    public boolean handleBack() {
-        if (dialog != Dialog.NONE) {
-            dialog = Dialog.NONE;
-            invalidate();
-            return true;
-        }
+    public boolean handleBackPressed() {
         if (screen != Screen.MENU) {
             goToMenu();
             return true;
@@ -249,90 +174,91 @@ public final class GameView extends View implements Runnable {
         return false;
     }
 
-    private void startLoop() {
-        if (!loopRunning) {
-            loopRunning = true;
-            lastFrameTime = SystemClock.uptimeMillis();
-            postOnAnimation(this);
-        }
-    }
-
     @Override
     public void run() {
-        if (!loopRunning) {
+        if (!loopActive) {
             return;
         }
         long now = SystemClock.uptimeMillis();
-        float dt = Math.min(0.05f, Math.max(0f, (now - lastFrameTime) / 1000f));
-        lastFrameTime = now;
+        float dt = Math.min(0.05f, Math.max(0f, (now - lastFrameMs) / 1000f));
+        lastFrameMs = now;
         if (!hostPaused) {
-            try {
-                update(dt, now);
-            } catch (RuntimeException runtimeException) {
-                recoverFromRuntimeError(runtimeException);
-            }
+            update(dt, now);
         }
+        updateAccessibilityState();
         invalidate();
         postOnAnimation(this);
     }
 
+    private void updateAccessibilityState() {
+        String next = "ELC|" + screen.name() + "|" + hero.name() + "|LEVEL=" + level;
+        if (!next.equals(accessibilityState)) {
+            accessibilityState = next;
+            setContentDescription(next);
+            Log.i(TAG, "ELC_STATE " + next);
+        }
+    }
+
     private void update(float dt, long now) {
-        updateParticles(dt);
-        updateActionEffects(dt);
+        worldTime += dt;
+        if (actionTimer > 0f) {
+            actionTimer = Math.max(0f, actionTimer - dt);
+        }
+        if (missFlash > 0f) {
+            missFlash = Math.max(0f, missFlash - dt);
+        }
+        if (successFlash > 0f) {
+            successFlash = Math.max(0f, successFlash - dt);
+        }
+        updateSparks(dt);
+
+        if (screen == Screen.COUNTDOWN) {
+            if (now - countdownStartMs >= 3000L) {
+                screen = Screen.PLAYING;
+                lastSpawnMs = now - spawnIntervalMs() + 350L;
+            }
+            return;
+        }
         if (screen != Screen.PLAYING) {
             return;
         }
 
-        if (now - lastSpawnTime >= spawnIntervalMs()) {
+        if (now - lastSpawnMs >= spawnIntervalMs()) {
             if (hero == Hero.LOZHKIN) {
-                if (movingItems.size() < maxActiveItems()) {
-                    spawnBottle(now);
+                if (bottles.size() < maxObjects()) {
+                    spawnBottle();
+                    lastSpawnMs = now;
                 }
-            } else if (prompts.size() < maxActiveItems()) {
-                spawnPrompt(now);
+            } else if (targets.size() < maxObjects()) {
+                spawnTarget();
+                lastSpawnMs = now;
             }
         }
 
         if (hero == Hero.LOZHKIN) {
             updateBottles(dt);
         } else {
-            updatePrompts(dt);
+            updateTargets(dt);
         }
     }
 
     private void updateBottles(float dt) {
-        Iterator<MovingItem> iterator = movingItems.iterator();
+        Iterator<Bottle> iterator = bottles.iterator();
         while (iterator.hasNext()) {
-            MovingItem item = iterator.next();
-            item.progress += dt / item.durationSeconds;
-            item.rotation += dt * (item.lane < 2 ? 230f : -230f);
-
-            if (item.progress >= 0.84f && item.progress <= 1.05f && selectedLane == item.lane) {
+            Bottle bottle = iterator.next();
+            bottle.t += dt / bottle.duration;
+            bottle.rotation += dt * (bottle.lane < 2 ? 260f : -260f);
+            if (bottle.t >= 0.88f && bottle.t <= 1.06f && bottle.lane == selectedLane) {
+                PointF p = lanePoint(bottle.lane);
                 iterator.remove();
-                onSuccess(item.lane, item.golden ? 2 : 1, item.golden);
+                onSuccess(p.x, p.y, bottle.golden ? 2 : 1, bottle.golden);
                 if (screen != Screen.PLAYING) {
                     return;
                 }
-            } else if (item.progress > 1.08f) {
-                PointF hit = lanePoint(item.lane);
+            } else if (bottle.t > 1.08f) {
+                PointF p = lanePoint(bottle.lane);
                 iterator.remove();
-                onMiss(hit.x, hit.y, item.golden ? 0xFFFFC928 : 0xFF6EC37D);
-                if (screen != Screen.PLAYING) {
-                    return;
-                }
-            }
-        }
-    }
-
-    private void updatePrompts(float dt) {
-        Iterator<PromptItem> iterator = prompts.iterator();
-        while (iterator.hasNext()) {
-            PromptItem item = iterator.next();
-            item.age += dt;
-            if (item.age > item.lifeSeconds) {
-                PointF p = lanePoint(item.lane);
-                iterator.remove();
-                onMiss(p.x, p.y, hero == Hero.RAK ? 0xFFFF9F2E : 0xFFFF5D34);
+                onMiss(p.x, p.y);
                 if (screen != Screen.PLAYING) {
                     return;
                 }
@@ -340,194 +266,158 @@ public final class GameView extends View implements Runnable {
         }
     }
 
-    private void updateParticles(float dt) {
-        Iterator<Particle> iterator = particles.iterator();
+    private void updateTargets(float dt) {
+        Iterator<Target> iterator = targets.iterator();
         while (iterator.hasNext()) {
-            Particle p = iterator.next();
-            p.life -= dt;
-            p.x += p.vx * dt;
-            p.y += p.vy * dt;
-            p.vy += p.gravity * dt;
-            p.rotation += p.spin * dt;
-            if (p.life <= 0f) {
+            Target target = iterator.next();
+            target.age += dt;
+            if (target.age >= target.life) {
+                PointF p = lanePoint(target.lane);
+                iterator.remove();
+                onMiss(p.x, p.y);
+                if (screen != Screen.PLAYING) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private void updateSparks(float dt) {
+        Iterator<Spark> iterator = sparks.iterator();
+        while (iterator.hasNext()) {
+            Spark spark = iterator.next();
+            spark.life -= dt;
+            spark.x += spark.vx * dt;
+            spark.y += spark.vy * dt;
+            spark.vy += spark.gravity * dt;
+            if (spark.life <= 0f) {
                 iterator.remove();
             }
         }
     }
 
-    private void updateActionEffects(float dt) {
-        Iterator<ActionEffect> iterator = actionEffects.iterator();
-        while (iterator.hasNext()) {
-            ActionEffect effect = iterator.next();
-            effect.age += dt;
-            if (effect.age >= effect.life) {
-                iterator.remove();
-            }
-        }
+    private void spawnBottle() {
+        int lane = chooseFreeLane(true);
+        float duration = Math.max(1.20f, 3.05f - level * 0.17f);
+        boolean golden = level >= 4 && random.nextFloat() < 0.07f;
+        bottles.add(new Bottle(lane, duration * (0.90f + random.nextFloat() * 0.20f), golden));
     }
 
-    private void spawnBottle(long now) {
-        int lane = chooseLaneWithLeastConflict(true);
-        boolean golden = level >= 4 && random.nextFloat() < 0.055f + level * 0.006f;
-        float jitter = 0.88f + random.nextFloat() * 0.24f;
-        movingItems.add(new MovingItem(lane, travelDurationSeconds() * jitter, golden));
-        lastSpawnTime = now;
+    private void spawnTarget() {
+        int lane = chooseFreeLane(false);
+        float life = Math.max(0.95f, 2.55f - level * 0.14f);
+        targets.add(new Target(lane, life));
     }
 
-    private void spawnPrompt(long now) {
-        int lane = chooseLaneWithLeastConflict(false);
-        prompts.add(new PromptItem(lane, promptLifetimeSeconds()));
-        lastSpawnTime = now;
-        softTone(ToneGenerator.TONE_PROP_PROMPT, 45);
-    }
-
-    private int chooseLaneWithLeastConflict(boolean bottle) {
-        ArrayList<Integer> candidates = new ArrayList<>();
+    private int chooseFreeLane(boolean forBottle) {
+        ArrayList<Integer> free = new ArrayList<Integer>();
         for (int lane = 0; lane < 4; lane++) {
-            boolean occupied = false;
-            if (bottle) {
-                for (MovingItem item : movingItems) {
-                    if (item.lane == lane && item.progress < 0.62f) {
-                        occupied = true;
+            boolean used = false;
+            if (forBottle) {
+                for (Bottle bottle : bottles) {
+                    if (bottle.lane == lane && bottle.t < 0.70f) {
+                        used = true;
                         break;
                     }
                 }
             } else {
-                for (PromptItem item : prompts) {
-                    if (item.lane == lane) {
-                        occupied = true;
+                for (Target target : targets) {
+                    if (target.lane == lane) {
+                        used = true;
                         break;
                     }
                 }
             }
-            if (!occupied) {
-                candidates.add(lane);
+            if (!used) {
+                free.add(lane);
             }
         }
-        if (candidates.isEmpty()) {
+        if (free.isEmpty()) {
             return random.nextInt(4);
         }
-        return candidates.get(random.nextInt(candidates.size()));
+        return free.get(random.nextInt(free.size()));
     }
 
-    private void onSuccess(int lane, int amount, boolean special) {
-        int points = (special ? 25 : 10) * level;
-        score += points;
-        progress += amount;
-        flashUntil = SystemClock.uptimeMillis() + 120;
-        PointF target = lanePoint(lane);
-        createSuccessParticles(target.x, target.y, special);
-        softTone(special ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP, special ? 115 : 70);
-        vibrate(28);
+    private void performAction(int lane) {
+        actionLane = lane;
+        actionTimer = 0.34f;
+        if (hero == Hero.LOZHKIN) {
+            selectedLane = lane;
+            return;
+        }
 
+        Target matched = null;
+        for (Target target : targets) {
+            if (target.lane == lane) {
+                matched = target;
+                break;
+            }
+        }
+        if (matched != null) {
+            targets.remove(matched);
+            PointF p = lanePoint(lane);
+            onSuccess(p.x, p.y, 1, false);
+        }
+    }
+
+    private void onSuccess(float x, float y, int amount, boolean golden) {
+        score += (golden ? 25 : 10) * level;
+        progress += amount;
+        successFlash = 0.14f;
+        addSparks(x, y, golden ? 0xFFFFD42A : heroAccent(), 18);
         if (progress >= targetForLevel()) {
             progress = targetForLevel();
-            movingItems.clear();
-            prompts.clear();
-            saveProgress();
+            bottles.clear();
+            targets.clear();
+            saveBestScore();
+            saveUnlockedLevel();
             if (level >= MAX_LEVEL) {
                 screen = Screen.VICTORY;
-                saveHighScore();
             } else {
-                screen = Screen.LEVEL_COMPLETE;
+                screen = Screen.LEVEL_DONE;
             }
         }
     }
 
-    private void onMiss(float x, float y, int color) {
+    private void onMiss(float x, float y) {
         lives--;
-        wrongUntil = SystemClock.uptimeMillis() + 240;
-        createMissParticles(x, y, color);
-        softTone(ToneGenerator.TONE_CDMA_ABBR_ALERT, 140);
-        vibrate(90);
+        missFlash = 0.22f;
+        addSparks(x, y, 0xFFFF4B35, 14);
         if (lives <= 0) {
             lives = 0;
-            movingItems.clear();
-            prompts.clear();
-            saveHighScore();
+            bottles.clear();
+            targets.clear();
+            saveBestScore();
             screen = Screen.GAME_OVER;
         }
     }
 
-    private void startHero(Hero selectedHero) {
-        hero = selectedHero;
-        level = 1;
-        score = 0;
-        lives = 3;
-        progress = 0;
-        selectedLane = 3;
-        movingItems.clear();
-        prompts.clear();
-        particles.clear();
-        actionEffects.clear();
-        screen = Screen.READY;
-        dialog = Dialog.NONE;
-        Log.i(TAG, "READY_" + selectedHero.name());
-        softTone(ToneGenerator.TONE_PROP_ACK, 100);
-    }
-
-    private void beginPlaying() {
-        movingItems.clear();
-        prompts.clear();
-        particles.clear();
-        actionEffects.clear();
-        screen = Screen.PLAYING;
-        Log.i(TAG, "PLAYING_" + hero.name());
-        lastFrameTime = SystemClock.uptimeMillis();
-        lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 350;
-        softTone(ToneGenerator.TONE_PROP_ACK, 90);
-    }
-
-    private void startNextLevel() {
-        level++;
-        lives = 3;
-        progress = 0;
-        selectedLane = 3;
-        movingItems.clear();
-        prompts.clear();
-        particles.clear();
-        actionEffects.clear();
-        screen = Screen.PLAYING;
-        Log.i(TAG, "PLAYING_" + hero.name() + " LEVEL_" + level);
-        lastSpawnTime = SystemClock.uptimeMillis() - spawnIntervalMs() + 420;
-        softTone(ToneGenerator.TONE_PROP_ACK, 100);
-    }
-
-    private void retryCurrentHero() {
-        startHero(hero);
-    }
-
-    private void goToMenu() {
-        saveHighScore();
-        screen = Screen.MENU;
-        dialog = Dialog.NONE;
-        movingItems.clear();
-        prompts.clear();
-        particles.clear();
-        actionEffects.clear();
-        Log.i(TAG, "SCREEN_MENU");
+    private void addSparks(float x, float y, int color, int count) {
+        for (int i = 0; i < count; i++) {
+            float angle = (float) (random.nextFloat() * Math.PI * 2.0);
+            float speed = width * (0.10f + random.nextFloat() * 0.22f);
+            sparks.add(new Spark(
+                    x,
+                    y,
+                    (float) Math.cos(angle) * speed,
+                    (float) Math.sin(angle) * speed,
+                    width * (0.006f + random.nextFloat() * 0.006f),
+                    0.35f + random.nextFloat() * 0.35f,
+                    color,
+                    height * 0.40f
+            ));
+        }
     }
 
     private int targetForLevel() {
-        return 9 + level * 3;
+        return 7 + level * 3;
     }
 
     private long spawnIntervalMs() {
-        if (hero == Hero.LOZHKIN) {
-            return Math.max(470L, 1420L - level * 85L);
-        }
-        return Math.max(500L, 1500L - level * 82L);
+        return Math.max(470L, 1440L - level * 88L);
     }
 
-    private float travelDurationSeconds() {
-        return Math.max(1.15f, 3.10f - level * 0.17f);
-    }
-
-    private float promptLifetimeSeconds() {
-        return Math.max(0.95f, 2.55f - level * 0.14f);
-    }
-
-    private int maxActiveItems() {
+    private int maxObjects() {
         if (level <= 2) {
             return 1;
         }
@@ -540,30 +430,79 @@ public final class GameView extends View implements Runnable {
         return 4;
     }
 
-    private String scoreKey(Hero h) {
-        return "score_" + h.index;
+    private void selectHero(Hero selected) {
+        hero = selected;
+        level = 1;
+        score = 0;
+        lives = 3;
+        progress = 0;
+        selectedLane = 3;
+        actionLane = 3;
+        actionTimer = 0f;
+        bottles.clear();
+        targets.clear();
+        sparks.clear();
+        releaseMenuBitmap();
+        beginCountdown();
     }
 
-    private String completedKey(Hero h) {
-        return "completed_" + h.index;
+    private void beginCountdown() {
+        screen = Screen.COUNTDOWN;
+        countdownStartMs = SystemClock.uptimeMillis();
+        lastSpawnMs = countdownStartMs;
     }
 
-    private void saveHighScore() {
-        int old = preferences.getInt(scoreKey(hero), 0);
+    private void nextLevel() {
+        level++;
+        lives = 3;
+        progress = 0;
+        selectedLane = 3;
+        bottles.clear();
+        targets.clear();
+        sparks.clear();
+        beginCountdown();
+    }
+
+    private void retryHero() {
+        score = 0;
+        lives = 3;
+        progress = 0;
+        level = 1;
+        selectedLane = 3;
+        bottles.clear();
+        targets.clear();
+        sparks.clear();
+        beginCountdown();
+    }
+
+    private void goToMenu() {
+        saveBestScore();
+        bottles.clear();
+        targets.clear();
+        sparks.clear();
+        screen = Screen.MENU;
+        ensureMenuBitmap();
+    }
+
+    private void saveBestScore() {
+        String key = "best_" + hero.name();
+        int old = preferences.getInt(key, 0);
         if (score > old) {
-            preferences.edit().putInt(scoreKey(hero), score).apply();
+            preferences.edit().putInt(key, score).apply();
         }
     }
 
-    private void saveProgress() {
-        int old = preferences.getInt(completedKey(hero), 0);
-        int newValue = Math.max(old, level);
-        preferences.edit().putInt(completedKey(hero), newValue).apply();
+    private void saveUnlockedLevel() {
+        String key = "level_" + hero.name();
+        int old = preferences.getInt(key, 1);
+        int unlocked = Math.min(MAX_LEVEL, level + 1);
+        if (unlocked > old) {
+            preferences.edit().putInt(key, unlocked).apply();
+        }
     }
 
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-        super.onSizeChanged(w, h, oldw, oldh);
         width = w;
         height = h;
     }
@@ -571,28 +510,20 @@ public final class GameView extends View implements Runnable {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        try {
-            ensureMenuBitmap();
-            if (screen == Screen.MENU) {
-                drawMenu(canvas);
-            } else {
-                drawGame(canvas);
-                if (screen != Screen.PLAYING) {
-                    drawGameOverlay(canvas);
-                }
-            }
-            if (dialog != Dialog.NONE) {
-                drawDialog(canvas);
-            }
-        } catch (RuntimeException runtimeException) {
-            recoverFromRuntimeError(runtimeException);
-            drawEmergencyScreen(canvas);
+        if (width <= 0f || height <= 0f) {
+            return;
+        }
+        if (screen == Screen.MENU) {
+            drawMenu(canvas);
+        } else {
+            drawGame(canvas);
         }
     }
 
     private void drawMenu(Canvas canvas) {
-        canvas.drawColor(Color.rgb(7, 10, 13));
-        if (menuBitmap == null || menuBitmap.isRecycled()) {
+        ensureMenuBitmap();
+        canvas.drawColor(0xFF06090C);
+        if (menuBitmap == null) {
             drawFallbackMenu(canvas);
             return;
         }
@@ -601,801 +532,578 @@ public final class GameView extends View implements Runnable {
         float drawH = menuBitmap.getHeight() * scale;
         float left = (width - drawW) * 0.5f;
         float top = (height - drawH) * 0.5f;
-        menuDst.set(left, top, left + drawW, top + drawH);
+        menuRect.set(left, top, left + drawW, top + drawH);
+        canvas.drawBitmap(menuBitmap, null, menuRect, paint);
 
-        paint.setColor(Color.WHITE);
-        canvas.drawBitmap(menuBitmap, null, menuDst, paint);
-
-        if (height > drawH + 2f) {
-            paint.setShader(new LinearGradient(0, 0, 0, top, 0xFF101820, 0xFF050709, Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, width, top, paint);
-            paint.setShader(new LinearGradient(0, menuDst.bottom, 0, height, 0xFF050709, 0xFF101820, Shader.TileMode.CLAMP));
-            canvas.drawRect(0, menuDst.bottom, width, height, paint);
-            paint.setShader(null);
+        if (SystemClock.uptimeMillis() < menuNoticeUntil) {
+            paint.setColor(0xE6171A1D);
+            RectF box = new RectF(width * 0.10f, height * 0.84f, width * 0.90f, height * 0.92f);
+            canvas.drawRoundRect(box, width * 0.025f, width * 0.025f, paint);
+            drawText(canvas, menuNotice, box.centerX(), box.centerY() + width * 0.015f, width * 0.037f, Color.WHITE);
         }
     }
 
     private void drawFallbackMenu(Canvas canvas) {
-        menuDst.set(0f, 0f, width, height);
-        paint.setShader(new LinearGradient(0, 0, 0, height, 0xFF14212A, 0xFF080B0D, Shader.TileMode.CLAMP));
-        canvas.drawRect(0, 0, width, height, paint);
+        paint.setShader(new LinearGradient(0f, 0f, 0f, height, 0xFF28313A, 0xFF070A0C, Shader.TileMode.CLAMP));
+        canvas.drawRect(0f, 0f, width, height, paint);
         paint.setShader(null);
-        drawCenteredText(canvas, "ЕЛЦ", width * 0.5f, height * 0.18f, width * 0.22f, 0xFFFFC522);
-        drawCenteredText(canvas, "ВЫБЕРИ СВОЕГО ГЕРОЯ", width * 0.5f, height * 0.28f, width * 0.052f, Color.WHITE);
-        for (Hero h : Hero.values()) {
-            float cx = width * (0.2f + h.index * 0.3f);
-            RectF card = new RectF(cx - width * 0.13f, height * 0.36f, cx + width * 0.13f, height * 0.78f);
-            drawPanel(canvas, card, heroColor(h), 0xFF20252A, width * 0.012f);
-            drawCenteredText(canvas, h.name, cx, height * 0.57f, width * 0.035f, Color.WHITE);
-            drawCenteredText(canvas, h.role, cx, height * 0.64f, width * 0.027f, 0xFFFFDB7A);
-            drawButton(canvas, new RectF(card.left + 10, card.bottom - height * 0.09f, card.right - 10, card.bottom - 12), "ИГРАТЬ", true);
-        }
+        drawText(canvas, "ЕЛЦ", width * 0.5f, height * 0.20f, width * 0.23f, 0xFFFFC72C);
+        drawText(canvas, "ВЫБЕРИ ГЕРОЯ", width * 0.5f, height * 0.31f, width * 0.055f, Color.WHITE);
+        drawText(canvas, "Александр", width * 0.18f, height * 0.58f, width * 0.038f, 0xFF9FE35E);
+        drawText(canvas, "Алик", width * 0.50f, height * 0.58f, width * 0.038f, 0xFFFFD047);
+        drawText(canvas, "Андрей", width * 0.82f, height * 0.58f, width * 0.038f, 0xFF72C8FF);
+        menuRect.set(0f, 0f, width, height);
     }
 
     private void drawGame(Canvas canvas) {
-        drawGameBackground(canvas);
-        drawPlayField(canvas);
-        drawControlZones(canvas);
-        drawCharacter(canvas);
+        drawBackground(canvas);
         drawHud(canvas);
-        drawParticles(canvas);
-        drawActionEffects(canvas);
-
-        long now = SystemClock.uptimeMillis();
-        if (now < flashUntil) {
-            paint.setColor(0x35FFFFFF);
-            canvas.drawRect(0, 0, width, height, paint);
+        drawObjects(canvas);
+        drawCharacter(canvas);
+        if (hero == Hero.KOROLEV && actionTimer > 0f) {
+            drawWaterStream(canvas);
         }
-        if (now < wrongUntil) {
-            paint.setColor(0x28FF2A20);
-            canvas.drawRect(0, 0, width, height, paint);
+        drawSparks(canvas);
+        drawHint(canvas);
+
+        if (successFlash > 0f) {
+            paint.setColor(0x22FFFFFF);
+            canvas.drawRect(0f, 0f, width, height, paint);
+        }
+        if (missFlash > 0f) {
+            paint.setColor(0x35FF1E12);
+            canvas.drawRect(0f, 0f, width, height, paint);
+        }
+
+        if (screen == Screen.COUNTDOWN) {
+            drawCountdown(canvas);
+        } else if (screen == Screen.PAUSED) {
+            drawOverlay(canvas, "ПАУЗА", "Игра остановлена", "ПРОДОЛЖИТЬ", "В МЕНЮ");
+        } else if (screen == Screen.LEVEL_DONE) {
+            drawOverlay(canvas, "УРОВЕНЬ " + level + " ПРОЙДЕН", "Очки: " + score, "СЛЕДУЮЩИЙ", "В МЕНЮ");
+        } else if (screen == Screen.GAME_OVER) {
+            drawOverlay(canvas, "ИГРА ОКОНЧЕНА", "Результат: " + score, "ЗАНОВО", "В МЕНЮ");
+        } else if (screen == Screen.VICTORY) {
+            drawOverlay(canvas, "ВСЕ 10 УРОВНЕЙ ПРОЙДЕНЫ", "Результат: " + score, "СЫГРАТЬ ЕЩЁ", "В МЕНЮ");
         }
     }
 
-    private void drawGameBackground(Canvas canvas) {
-        int topColor;
-        int bottomColor;
+    private void drawBackground(Canvas canvas) {
+        int top;
+        int bottom;
         if (hero == Hero.LOZHKIN) {
-            topColor = 0xFF213427;
-            bottomColor = 0xFF080D0A;
+            top = 0xFF2E432D;
+            bottom = 0xFF08100A;
         } else if (hero == Hero.RAK) {
-            topColor = 0xFF493115;
-            bottomColor = 0xFF100B06;
+            top = 0xFF493716;
+            bottom = 0xFF100B05;
         } else {
-            topColor = 0xFF17344A;
-            bottomColor = 0xFF070D13;
+            top = 0xFF17405B;
+            bottom = 0xFF061019;
         }
-        paint.setShader(new LinearGradient(0, 0, 0, height, topColor, bottomColor, Shader.TileMode.CLAMP));
-        canvas.drawRect(0, 0, width, height, paint);
+        paint.setShader(new LinearGradient(0f, 0f, 0f, height, top, bottom, Shader.TileMode.CLAMP));
+        canvas.drawRect(0f, 0f, width, height, paint);
         paint.setShader(null);
 
-        paint.setColor(0x2AFFFFFF);
+        paint.setColor(0x22FFFFFF);
+        for (int i = 0; i < 7; i++) {
+            float x = width * (0.07f + i * 0.145f);
+            canvas.drawRect(x, height * 0.13f, x + width * 0.008f, height, paint);
+        }
+        paint.setColor(0x28000000);
         for (int i = 0; i < 8; i++) {
-            float x = width * (i / 7f);
-            canvas.drawRect(x, height * 0.11f, x + Math.max(2f, width * 0.005f), height, paint);
+            float y = height * (0.18f + i * 0.095f);
+            canvas.drawRect(0f, y, width, y + height * 0.006f, paint);
         }
-        paint.setColor(0x22000000);
-        for (int i = 0; i < 9; i++) {
-            float y = height * (0.17f + i * 0.09f);
-            canvas.drawRect(0, y, width, y + Math.max(2f, height * 0.004f), paint);
-        }
-    }
 
-    private void drawPlayField(Canvas canvas) {
         if (hero == Hero.LOZHKIN) {
-            drawBottleField(canvas);
+            drawShop(canvas, true);
+            drawShop(canvas, false);
+            drawBottleRails(canvas);
         } else if (hero == Hero.RAK) {
-            drawCauldronField(canvas);
+            drawPipes(canvas);
         } else {
-            drawFireField(canvas);
+            drawWarehouse(canvas);
         }
-        drawLaneHints(canvas);
-    }
-
-    private void drawBottleField(Canvas canvas) {
-        drawShop(canvas, true);
-        drawShop(canvas, false);
-
-        for (int lane = 0; lane < 4; lane++) {
-            PointF start = bottleStart(lane);
-            PointF end = lanePoint(lane);
-            PointF control = bottleControl(lane);
-            Path rail = new Path();
-            rail.moveTo(start.x, start.y);
-            rail.quadTo(control.x, control.y, end.x, end.y);
-            stroke.setStrokeWidth(Math.max(5f, width * 0.012f));
-            stroke.setColor(0xFF5A4B35);
-            canvas.drawPath(rail, stroke);
-            stroke.setStrokeWidth(Math.max(2f, width * 0.004f));
-            stroke.setColor(0xFFB99B62);
-            canvas.drawPath(rail, stroke);
-        }
-
-        for (MovingItem item : movingItems) {
-            PointF p = quadraticPoint(bottleStart(item.lane), bottleControl(item.lane), lanePoint(item.lane), item.progress);
-            drawBottle(canvas, p.x, p.y, width * 0.032f, item.rotation, item.golden);
-        }
-
-        PointF bagPoint = lanePoint(selectedLane);
-        drawBag(canvas, bagPoint.x, bagPoint.y + height * 0.024f, width * 0.11f, selectedLane < 2);
-    }
-
-    private void drawCauldronField(Canvas canvas) {
-        paint.setColor(0x55251910);
-        canvas.drawRoundRect(new RectF(width * 0.08f, height * 0.18f, width * 0.92f, height * 0.78f), width * 0.04f, width * 0.04f, paint);
-        drawPipeNetwork(canvas);
-        for (PromptItem item : prompts) {
-            PointF p = lanePoint(item.lane);
-            float remaining = 1f - item.age / item.lifeSeconds;
-            float pulse = 1f + (float) Math.sin(item.age * 8f) * 0.045f;
-            drawCauldron(canvas, p.x, p.y, width * 0.105f * pulse, remaining);
-        }
-        drawLog(canvas, width * 0.5f, height * 0.70f, width * 0.10f, -8f);
-    }
-
-    private void drawFireField(Canvas canvas) {
-        paint.setColor(0x3A0D2230);
-        canvas.drawRoundRect(new RectF(width * 0.07f, height * 0.17f, width * 0.93f, height * 0.79f), width * 0.04f, width * 0.04f, paint);
-        drawWarehouseWindows(canvas);
-        for (PromptItem item : prompts) {
-            PointF p = lanePoint(item.lane);
-            float remaining = 1f - item.age / item.lifeSeconds;
-            float grow = 0.82f + item.age / item.lifeSeconds * 0.32f;
-            drawFire(canvas, p.x, p.y, width * 0.09f * grow, remaining);
-        }
-        drawHoseNozzle(canvas, width * 0.53f, height * 0.72f, width * 0.085f, -15f);
-    }
-
-    private void drawLaneHints(Canvas canvas) {
-        for (int lane = 0; lane < 4; lane++) {
-            PointF p = lanePoint(lane);
-            boolean active = hero == Hero.LOZHKIN && selectedLane == lane;
-            stroke.setStrokeWidth(active ? width * 0.012f : width * 0.006f);
-            stroke.setColor(active ? 0xFFFFD83D : 0x48FFFFFF);
-            canvas.drawCircle(p.x, p.y, width * 0.075f, stroke);
-            if (active) {
-                paint.setColor(0x2AFFF36A);
-                canvas.drawCircle(p.x, p.y, width * 0.07f, paint);
-            }
-        }
-    }
-
-    private void drawControlZones(Canvas canvas) {
-        String[] labels = {"СЛЕВА СВЕРХУ", "СЛЕВА СНИЗУ", "СПРАВА СВЕРХУ", "СПРАВА СНИЗУ"};
-        for (int lane = 0; lane < 4; lane++) {
-            PointF point = lanePoint(lane);
-            boolean selected = hero == Hero.LOZHKIN && selectedLane == lane;
-            float halfW = width * 0.125f;
-            float halfH = height * 0.072f;
-            RectF zone = new RectF(point.x - halfW, point.y - halfH, point.x + halfW, point.y + halfH);
-            paint.setColor(selected ? 0x55FFD43A : 0x26000000);
-            canvas.drawRoundRect(zone, width * 0.025f, width * 0.025f, paint);
-            stroke.setStrokeWidth(selected ? width * 0.009f : width * 0.004f);
-            stroke.setColor(selected ? 0xFFFFD43A : 0x66FFFFFF);
-            canvas.drawRoundRect(zone, width * 0.025f, width * 0.025f, stroke);
-            drawCenteredText(canvas, labels[lane], point.x, zone.bottom - height * 0.012f, width * 0.020f, selected ? 0xFFFFE47A : 0xBFFFFFFF);
-        }
-        String hint;
-        if (hero == Hero.LOZHKIN) {
-            hint = "КОСНИСЬ НУЖНОГО СЕКТОРА — ПАКЕТ ПЕРЕМЕСТИТСЯ";
-        } else if (hero == Hero.RAK) {
-            hint = "КОСНИСЬ КОТЛА — ПОЛЕНО ПОЛЕТИТ В НЕГО";
-        } else {
-            hint = "КОСНИСЬ ОГНЯ — СТРУЯ ВОДЫ ПОТУШИТ ЕГО";
-        }
-        paint.setColor(0xB8000000);
-        RectF hintBox = new RectF(width * 0.06f, height * 0.925f, width * 0.94f, height * 0.975f);
-        canvas.drawRoundRect(hintBox, width * 0.02f, width * 0.02f, paint);
-        drawCenteredText(canvas, hint, width * 0.5f, hintBox.centerY() + width * 0.011f, width * 0.024f, 0xFFFFD85A);
-    }
-
-    private void recoverFromRuntimeError(RuntimeException runtimeException) {
-        Log.e(TAG, "RECOVERED_RUNTIME_ERROR", runtimeException);
-        movingItems.clear();
-        prompts.clear();
-        particles.clear();
-        actionEffects.clear();
-        screen = Screen.MENU;
-        dialog = Dialog.NONE;
-        lastSpawnTime = SystemClock.uptimeMillis();
-    }
-
-    private void drawEmergencyScreen(Canvas canvas) {
-        canvas.drawColor(0xFF101417);
-        menuDst.set(0f, 0f, width, height);
-        drawCenteredText(canvas, "ЕЛЦ", width * 0.5f, height * 0.24f, width * 0.20f, 0xFFFFC52E);
-        drawCenteredText(canvas, "ИГРА ВОССТАНОВЛЕНА", width * 0.5f, height * 0.40f, width * 0.052f, Color.WHITE);
-        drawWrappedCenteredText(canvas, "Коснись экрана, чтобы вернуться в главное меню", width * 0.5f, height * 0.49f, width * 0.78f, width * 0.036f, 0xFFFFD765, height * 0.045f);
     }
 
     private void drawHud(Canvas canvas) {
-        RectF hud = new RectF(width * 0.02f, height * 0.018f, width * 0.98f, height * 0.13f);
-        drawPanel(canvas, hud, 0xFFFFC42A, 0xE614171A, width * 0.012f);
+        RectF panel = new RectF(width * 0.025f, height * 0.018f, width * 0.975f, height * 0.125f);
+        drawPanel(canvas, panel, heroAccent(), 0xE8171A1E, width * 0.010f);
+        drawText(canvas, "‹", width * 0.075f, height * 0.083f, width * 0.095f, Color.WHITE);
+        drawText(canvas, "Ⅱ", width * 0.925f, height * 0.080f, width * 0.052f, Color.WHITE);
+        drawText(canvas, hero.title, width * 0.5f, height * 0.058f, width * 0.048f, Color.WHITE);
+        String stats = "УРОВЕНЬ " + level + "/10   •   ОЧКИ " + score + "   •   ЖИЗНИ " + lives;
+        drawText(canvas, stats, width * 0.5f, height * 0.101f, width * 0.028f, 0xFFFFDB69);
 
-        float buttonSize = height * 0.072f;
-        RectF back = new RectF(hud.left + width * 0.018f, hud.centerY() - buttonSize * 0.5f, hud.left + width * 0.018f + buttonSize, hud.centerY() + buttonSize * 0.5f);
-        RectF pause = new RectF(hud.right - width * 0.018f - buttonSize, hud.centerY() - buttonSize * 0.5f, hud.right - width * 0.018f, hud.centerY() + buttonSize * 0.5f);
-        drawSmallButton(canvas, back, "←");
-        drawSmallButton(canvas, pause, "Ⅱ");
-
-        drawCenteredText(canvas, hero.name, width * 0.5f, hud.top + height * 0.035f, width * 0.048f, Color.WHITE);
-        String stats = String.format(Locale.getDefault(), "УРОВЕНЬ %d/10   •   ОЧКИ %d   •   ЖИЗНИ %d", level, score, lives);
-        drawCenteredText(canvas, stats, width * 0.5f, hud.top + height * 0.076f, width * 0.031f, 0xFFFFD763);
-
-        RectF progressBg = new RectF(width * 0.18f, height * 0.139f, width * 0.82f, height * 0.157f);
-        paint.setColor(0x88000000);
-        canvas.drawRoundRect(progressBg, progressBg.height() * 0.5f, progressBg.height() * 0.5f, paint);
-        float fraction = targetForLevel() == 0 ? 0f : Math.min(1f, progress / (float) targetForLevel());
-        if (fraction > 0.001f) {
-            RectF progressFill = new RectF(progressBg.left, progressBg.top, progressBg.left + progressBg.width() * fraction, progressBg.bottom);
-            if (progressFill.width() > 1f) {
-                paint.setShader(new LinearGradient(progressFill.left, 0, progressFill.right, 0, 0xFFFFB21A, 0xFFFFE760, Shader.TileMode.CLAMP));
-            } else {
-                paint.setColor(0xFFFFB21A);
-            }
-            canvas.drawRoundRect(progressFill, progressBg.height() * 0.5f, progressBg.height() * 0.5f, paint);
-            paint.setShader(null);
+        RectF bar = new RectF(width * 0.17f, height * 0.138f, width * 0.83f, height * 0.158f);
+        paint.setColor(0x99000000);
+        canvas.drawRoundRect(bar, bar.height() * 0.5f, bar.height() * 0.5f, paint);
+        float fraction = Math.min(1f, progress / (float) targetForLevel());
+        if (fraction > 0f) {
+            RectF fill = new RectF(bar.left, bar.top, bar.left + bar.width() * fraction, bar.bottom);
+            paint.setColor(heroAccent());
+            canvas.drawRoundRect(fill, fill.height() * 0.5f, fill.height() * 0.5f, paint);
         }
-        drawCenteredText(canvas, progress + " / " + targetForLevel(), width * 0.5f, height * 0.178f, width * 0.028f, Color.WHITE);
+        drawText(canvas, progress + " / " + targetForLevel(), width * 0.5f, height * 0.188f, width * 0.027f, Color.WHITE);
+    }
+
+    private void drawObjects(Canvas canvas) {
+        if (hero == Hero.LOZHKIN) {
+            for (Bottle bottle : bottles) {
+                PointF start = bottleStart(bottle.lane);
+                PointF control = bottleControl(bottle.lane);
+                PointF end = lanePoint(bottle.lane);
+                PointF p = quadratic(start, control, end, bottle.t);
+                drawBottle(canvas, p.x, p.y, width * 0.035f, bottle.rotation, bottle.golden);
+            }
+            PointF bag = lanePoint(selectedLane);
+            drawBag(canvas, bag.x, bag.y + height * 0.035f, width * 0.12f, selectedLane < 2);
+        } else {
+            for (Target target : targets) {
+                PointF p = lanePoint(target.lane);
+                float pulse = 1f + (float) Math.sin(target.age * 8f) * 0.05f;
+                float remain = Math.max(0f, 1f - target.age / target.life);
+                if (hero == Hero.RAK) {
+                    drawCauldron(canvas, p.x, p.y, width * 0.11f * pulse, remain);
+                } else {
+                    drawFire(canvas, p.x, p.y, width * 0.105f * pulse, remain);
+                }
+            }
+        }
+
+        for (int lane = 0; lane < 4; lane++) {
+            PointF p = lanePoint(lane);
+            boolean selected = hero == Hero.LOZHKIN && lane == selectedLane;
+            stroke.setStrokeWidth(selected ? width * 0.010f : width * 0.004f);
+            stroke.setColor(selected ? 0xFFFFD43A : 0x50FFFFFF);
+            canvas.drawCircle(p.x, p.y, width * 0.085f, stroke);
+        }
     }
 
     private void drawCharacter(Canvas canvas) {
-        RectF frame = new RectF(width * 0.36f, height * 0.56f, width * 0.64f, height * 0.91f);
-        drawPanel(canvas, frame, heroColor(hero), 0xEF12171A, width * 0.012f);
+        int activeLane = hero == Hero.LOZHKIN ? selectedLane : (actionTimer > 0f ? actionLane : 3);
+        float side = activeLane < 2 ? -1f : 1f;
+        float vertical = (activeLane % 2 == 0) ? -1f : 1f;
+        float activity = hero == Hero.LOZHKIN ? 1f : Math.min(1f, actionTimer / 0.22f);
+        float x = width * 0.5f + side * width * 0.14f * activity;
+        float y = height * 0.755f + vertical * height * 0.020f * activity + (float) Math.sin(worldTime * 3.2f) * height * 0.004f;
+        float s = width * 0.23f;
 
-        Rect source = portraitSource(hero);
-        RectF portrait = new RectF(frame.left + width * 0.012f, frame.top + width * 0.012f, frame.right - width * 0.012f, frame.bottom - height * 0.055f);
-        int save = canvas.save();
-        Path clip = new Path();
-        clip.addRoundRect(portrait, width * 0.025f, width * 0.025f, Path.Direction.CW);
-        canvas.clipPath(clip);
-        if (menuBitmap != null && !menuBitmap.isRecycled()) {
-            canvas.drawBitmap(menuBitmap, source, portrait, paint);
+        canvas.save();
+        canvas.translate(x, y);
+        canvas.rotate(side * vertical * 3.5f * activity);
+
+        // Shadow
+        paint.setColor(0x66000000);
+        canvas.drawOval(new RectF(-s * 0.52f, s * 0.85f, s * 0.52f, s * 1.10f), paint);
+
+        // Legs
+        paint.setColor(hero == Hero.RAK ? 0xFFE46C20 : 0xFF34453A);
+        canvas.drawRoundRect(new RectF(-s * 0.34f, s * 0.48f, -s * 0.05f, s * 0.96f), s * 0.10f, s * 0.10f, paint);
+        canvas.drawRoundRect(new RectF(s * 0.05f, s * 0.48f, s * 0.34f, s * 0.96f), s * 0.10f, s * 0.10f, paint);
+        paint.setColor(0xFF171A1D);
+        canvas.drawOval(new RectF(-s * 0.43f, s * 0.88f, -s * 0.02f, s * 1.06f), paint);
+        canvas.drawOval(new RectF(s * 0.02f, s * 0.88f, s * 0.43f, s * 1.06f), paint);
+
+        // Torso
+        Path torso = new Path();
+        torso.moveTo(-s * 0.42f, -s * 0.20f);
+        torso.quadTo(-s * 0.52f, s * 0.10f, -s * 0.39f, s * 0.58f);
+        torso.lineTo(s * 0.39f, s * 0.58f);
+        torso.quadTo(s * 0.52f, s * 0.10f, s * 0.42f, -s * 0.20f);
+        torso.close();
+        paint.setColor(heroBodyColor());
+        canvas.drawPath(torso, paint);
+        stroke.setStrokeWidth(s * 0.035f);
+        stroke.setColor(0xCC111317);
+        canvas.drawPath(torso, stroke);
+
+        drawSuitDetails(canvas, s);
+
+        // Head sprite
+        Bitmap head = currentHead();
+        if (head != null) {
+            float headH = s * 0.78f;
+            float headW = headH * head.getWidth() / (float) head.getHeight();
+            RectF headDst = new RectF(-headW * 0.5f, -s * 0.89f, headW * 0.5f, -s * 0.89f + headH);
+            canvas.drawBitmap(head, null, headDst, paint);
+        }
+
+        drawArmsAndTool(canvas, s, side, vertical, activity);
+        canvas.restore();
+    }
+
+    private void drawSuitDetails(Canvas canvas, float s) {
+        if (hero == Hero.RAK) {
+            paint.setColor(0xFF2A8D54);
+            canvas.drawRect(-s * 0.41f, s * 0.20f, s * 0.41f, s * 0.28f, paint);
+            paint.setColor(0xFFD8D9D3);
+            canvas.drawRect(-s * 0.40f, s * 0.29f, s * 0.40f, s * 0.37f, paint);
+            stroke.setStrokeWidth(s * 0.025f);
+            stroke.setColor(0xFF24834A);
+            canvas.drawLine(0f, -s * 0.17f, 0f, s * 0.55f, stroke);
         } else {
-            paint.setColor(heroColor(hero));
-            canvas.drawRect(portrait, paint);
-        }
-        canvas.restoreToCount(save);
-
-        paint.setColor(0xD9000000);
-        canvas.drawRoundRect(new RectF(frame.left + width * 0.008f, frame.bottom - height * 0.064f, frame.right - width * 0.008f, frame.bottom - height * 0.008f), width * 0.018f, width * 0.018f, paint);
-        drawCenteredText(canvas, hero.role.toUpperCase(Locale.getDefault()), frame.centerX(), frame.bottom - height * 0.025f, width * 0.025f, 0xFFFFD24A);
-    }
-
-    private Rect portraitSource(Hero h) {
-        if (h == Hero.LOZHKIN) {
-            return new Rect(30, 510, 305, 925);
-        }
-        if (h == Hero.RAK) {
-            return new Rect(330, 510, 610, 925);
-        }
-        return new Rect(630, 510, 925, 925);
-    }
-
-    private void drawParticles(Canvas canvas) {
-        for (Particle p : particles) {
-            int alpha = (int) (255f * Math.max(0f, Math.min(1f, p.life / p.maxLife)));
-            paint.setColor((p.color & 0x00FFFFFF) | (alpha << 24));
-            canvas.save();
-            canvas.rotate(p.rotation, p.x, p.y);
-            canvas.drawRoundRect(new RectF(p.x - p.size, p.y - p.size * 0.55f, p.x + p.size, p.y + p.size * 0.55f), p.size * 0.25f, p.size * 0.25f, paint);
-            canvas.restore();
-        }
-    }
-
-    private void drawActionEffects(Canvas canvas) {
-        for (ActionEffect effect : actionEffects) {
-            float t = Math.min(1f, effect.age / effect.life);
-            PointF from = new PointF(width * 0.5f, height * 0.69f);
-            PointF to = lanePoint(effect.lane);
-            if (effect.water) {
-                stroke.setStrokeWidth(width * (0.026f - 0.012f * t));
-                stroke.setColor((int) ((1f - t) * 210) << 24 | 0x005ED6FF);
-                canvas.drawLine(from.x, from.y, to.x, to.y, stroke);
-                stroke.setStrokeWidth(width * 0.007f);
-                stroke.setColor((int) ((1f - t) * 255) << 24 | 0x00E7FAFF);
-                canvas.drawLine(from.x, from.y, to.x, to.y, stroke);
-            } else {
-                float eased = 1f - (1f - t) * (1f - t);
-                float x = from.x + (to.x - from.x) * eased;
-                float y = from.y + (to.y - from.y) * eased - height * 0.12f * (float) Math.sin(Math.PI * eased);
-                drawLog(canvas, x, y, width * 0.065f, (to.x < from.x ? -1 : 1) * t * 220f);
+            paint.setColor(0x44212F21);
+            for (int i = 0; i < 8; i++) {
+                float px = -s * 0.32f + randomPattern(i) * s * 0.64f;
+                float py = -s * 0.08f + randomPattern(i + 9) * s * 0.55f;
+                canvas.drawOval(new RectF(px - s * 0.08f, py - s * 0.04f, px + s * 0.08f, py + s * 0.04f), paint);
             }
+            stroke.setStrokeWidth(s * 0.025f);
+            stroke.setColor(0xFF1D2420);
+            canvas.drawLine(0f, -s * 0.17f, 0f, s * 0.55f, stroke);
         }
     }
 
-    private void drawGameOverlay(Canvas canvas) {
-        paint.setColor(0xB9000000);
-        canvas.drawRect(0, 0, width, height, paint);
-        RectF panel = new RectF(width * 0.10f, height * 0.27f, width * 0.90f, height * 0.76f);
-        drawPanel(canvas, panel, 0xFFFFC428, 0xF21B2024, width * 0.015f);
+    private float randomPattern(int seed) {
+        int value = (seed * 73 + 19) % 97;
+        return value / 97f;
+    }
 
-        String title;
-        String subtitle;
-        String primary;
-        String secondary;
-        if (screen == Screen.READY) {
-            title = hero.name.toUpperCase(Locale.getDefault());
-            if (hero == Hero.LOZHKIN) {
-                subtitle = "Нажимай на один из четырёх секторов и подставляй пакет под бутылку";
-            } else if (hero == Hero.RAK) {
-                subtitle = "Нажимай на сектор, где появился котёл, чтобы бросить полено";
-            } else {
-                subtitle = "Нажимай на сектор с огнём, чтобы направить туда воду";
-            }
-            primary = "НАЧАТЬ ИГРУ";
-            secondary = "В МЕНЮ";
-        } else if (screen == Screen.PAUSED) {
-            title = "ПАУЗА";
-            subtitle = "Игра остановлена";
-            primary = "ПРОДОЛЖИТЬ";
-            secondary = "В МЕНЮ";
-        } else if (screen == Screen.LEVEL_COMPLETE) {
-            title = "УРОВЕНЬ " + level + " ПРОЙДЕН";
-            subtitle = "Отличная работа! Очки: " + score;
-            primary = "СЛЕДУЮЩИЙ УРОВЕНЬ";
-            secondary = "В МЕНЮ";
-        } else if (screen == Screen.GAME_OVER) {
-            title = "ИГРА ОКОНЧЕНА";
-            subtitle = "Результат: " + score + " очков";
-            primary = "НАЧАТЬ ЗАНОВО";
-            secondary = "В МЕНЮ";
+    private void drawArmsAndTool(Canvas canvas, float s, float side, float vertical, float activity) {
+        float targetX = side * s * (0.66f + activity * 0.18f);
+        float targetY = s * (0.08f + vertical * 0.22f * activity);
+        stroke.setStrokeWidth(s * 0.20f);
+        stroke.setColor(heroBodyColor());
+        canvas.drawLine(-s * 0.28f, -s * 0.03f, targetX * 0.72f, targetY, stroke);
+        canvas.drawLine(s * 0.28f, -s * 0.03f, targetX * 0.82f, targetY + s * 0.12f, stroke);
+        stroke.setStrokeWidth(s * 0.07f);
+        stroke.setColor(0xFF15191C);
+        canvas.drawLine(-s * 0.28f, -s * 0.03f, targetX * 0.72f, targetY, stroke);
+        canvas.drawLine(s * 0.28f, -s * 0.03f, targetX * 0.82f, targetY + s * 0.12f, stroke);
+
+        if (hero == Hero.RAK) {
+            float logX = targetX * (0.70f + 0.30f * activity);
+            float logY = targetY - s * 0.03f;
+            drawLog(canvas, logX, logY, s * 0.30f, side * -18f);
+        } else if (hero == Hero.KOROLEV) {
+            stroke.setStrokeWidth(s * 0.10f);
+            stroke.setColor(0xFF252B30);
+            canvas.drawLine(-s * 0.15f, s * 0.05f, targetX, targetY, stroke);
+            stroke.setStrokeWidth(s * 0.045f);
+            stroke.setColor(0xFF0F1113);
+            canvas.drawLine(-s * 0.15f, s * 0.05f, targetX, targetY, stroke);
+            paint.setColor(0xFF454C52);
+            canvas.drawCircle(targetX, targetY, s * 0.08f, paint);
+        }
+    }
+
+
+    private void drawWaterStream(Canvas canvas) {
+        PointF target = lanePoint(actionLane);
+        float side = actionLane < 2 ? -1f : 1f;
+        float vertical = (actionLane % 2 == 0) ? -1f : 1f;
+        float activity = Math.min(1f, actionTimer / 0.22f);
+        float startX = width * 0.5f + side * width * (0.14f + 0.16f * activity);
+        float startY = height * 0.755f + vertical * height * (0.020f + 0.050f * activity);
+        stroke.setStrokeWidth(width * 0.027f);
+        stroke.setColor(0xAA57CFFF);
+        canvas.drawLine(startX, startY, target.x, target.y, stroke);
+        stroke.setStrokeWidth(width * 0.008f);
+        stroke.setColor(0xFFE6FAFF);
+        canvas.drawLine(startX, startY, target.x, target.y, stroke);
+    }
+
+    private void drawCountdown(Canvas canvas) {
+        long elapsed = SystemClock.uptimeMillis() - countdownStartMs;
+        int number = 3 - (int) (elapsed / 1000L);
+        paint.setColor(0xB8000000);
+        canvas.drawRect(0f, 0f, width, height, paint);
+        drawText(canvas, hero.title.toUpperCase(Locale.getDefault()), width * 0.5f, height * 0.34f, width * 0.060f, heroAccent());
+        drawText(canvas, hero.task, width * 0.5f, height * 0.41f, width * 0.039f, Color.WHITE);
+        drawText(canvas, number > 0 ? String.valueOf(number) : "СТАРТ!", width * 0.5f, height * 0.62f, width * 0.24f, 0xFFFFD331);
+    }
+
+    private void drawOverlay(Canvas canvas, String title, String subtitle, String primary, String secondary) {
+        paint.setColor(0xC7000000);
+        canvas.drawRect(0f, 0f, width, height, paint);
+        RectF panel = new RectF(width * 0.10f, height * 0.28f, width * 0.90f, height * 0.75f);
+        drawPanel(canvas, panel, heroAccent(), 0xF21B2024, width * 0.014f);
+        drawText(canvas, title, width * 0.5f, height * 0.39f, width * 0.055f, heroAccent());
+        drawText(canvas, subtitle, width * 0.5f, height * 0.47f, width * 0.038f, Color.WHITE);
+        drawButton(canvas, primaryButton(), primary, true);
+        drawButton(canvas, secondaryButton(), secondary, false);
+    }
+
+    private RectF primaryButton() {
+        return new RectF(width * 0.19f, height * 0.55f, width * 0.81f, height * 0.63f);
+    }
+
+    private RectF secondaryButton() {
+        return new RectF(width * 0.19f, height * 0.66f, width * 0.81f, height * 0.72f);
+    }
+
+    private void drawHint(Canvas canvas) {
+        String hint;
+        if (hero == Hero.LOZHKIN) {
+            hint = "КАСАЙСЯ ЧЕТЫРЁХ ЗОН — ПЕРЕКЛАДЫВАЙ ПАКЕТ";
+        } else if (hero == Hero.RAK) {
+            hint = "КАСАЙСЯ КОТЛА — АЛИК БРОСИТ ПОЛЕНО";
         } else {
-            title = "ВСЕ 10 УРОВНЕЙ ПРОЙДЕНЫ!";
-            subtitle = hero.name + " — результат " + score;
-            primary = "СЫГРАТЬ ЕЩЁ";
-            secondary = "В МЕНЮ";
+            hint = "КАСАЙСЯ ОГНЯ — АНДРЕЙ НАПРАВИТ ВОДУ";
         }
-        drawCenteredText(canvas, title, width * 0.5f, panel.top + height * 0.105f, width * 0.058f, 0xFFFFD040);
-        drawWrappedCenteredText(canvas, subtitle, width * 0.5f, panel.top + height * 0.17f, panel.width() * 0.78f, width * 0.034f, Color.WHITE, height * 0.042f);
-        drawButton(canvas, overlayPrimaryRect(), primary, true);
-        drawButton(canvas, overlaySecondaryRect(), secondary, false);
+        paint.setColor(0xB8000000);
+        RectF box = new RectF(width * 0.04f, height * 0.934f, width * 0.96f, height * 0.982f);
+        canvas.drawRoundRect(box, width * 0.02f, width * 0.02f, paint);
+        drawText(canvas, hint, width * 0.5f, height * 0.966f, width * 0.022f, 0xFFFFD85A);
     }
 
-    private RectF overlayPrimaryRect() {
-        return new RectF(width * 0.19f, height * 0.53f, width * 0.81f, height * 0.61f);
-    }
-
-    private RectF overlaySecondaryRect() {
-        return new RectF(width * 0.19f, height * 0.64f, width * 0.81f, height * 0.72f);
-    }
-
-    private void drawDialog(Canvas canvas) {
-        paint.setColor(0xC5000000);
-        canvas.drawRect(0, 0, width, height, paint);
-        RectF panel = new RectF(width * 0.07f, height * 0.15f, width * 0.93f, height * 0.86f);
-        drawPanel(canvas, panel, 0xFFFFC12A, 0xF31A1E22, width * 0.014f);
-
-        String title;
-        List<String> lines = new ArrayList<>();
-        switch (dialog) {
-            case SETTINGS:
-                title = "НАСТРОЙКИ";
-                lines.add("Звук: " + (soundEnabled ? "ВКЛ" : "ВЫКЛ"));
-                lines.add("Вибрация: " + (vibrationEnabled ? "ВКЛ" : "ВЫКЛ"));
-                lines.add("Нажми на строку, чтобы переключить");
-                break;
-            case INFO:
-                title = "КАК ИГРАТЬ";
-                lines.add("Александр: выбирай один из четырёх углов и лови бутылки пакетом.");
-                lines.add("Алик: нажимай на сторону, где появился котёл, чтобы бросить полено.");
-                lines.add("Андрей: нажимай на сторону с огнём, чтобы направить струю воды.");
-                lines.add("У каждого героя 10 уровней. Три промаха — проигрыш.");
-                lines.add("Версия игры: 1.2.0");
-                break;
-            case RECORDS:
-                title = "РЕКОРДЫ";
-                for (Hero h : Hero.values()) {
-                    lines.add(h.name + ": " + preferences.getInt(scoreKey(h), 0) + " очков");
-                }
-                break;
-            case ACHIEVEMENTS:
-                title = "ДОСТИЖЕНИЯ";
-                for (Hero h : Hero.values()) {
-                    int completed = preferences.getInt(completedKey(h), 0);
-                    lines.add(h.name + ": пройдено уровней " + completed + "/10");
-                }
-                break;
-            case RATING:
-                title = "ЛОКАЛЬНЫЙ РЕЙТИНГ";
-                ArrayList<Hero> rating = new ArrayList<>();
-                Collections.addAll(rating, Hero.values());
-                Collections.sort(rating, new Comparator<Hero>() {
-                    @Override
-                    public int compare(Hero first, Hero second) {
-                        int firstScore = preferences.getInt(scoreKey(first), 0);
-                        int secondScore = preferences.getInt(scoreKey(second), 0);
-                        return Integer.compare(secondScore, firstScore);
-                    }
-                });
-                for (int i = 0; i < rating.size(); i++) {
-                    Hero h = rating.get(i);
-                    lines.add((i + 1) + ". " + h.name + " — " + preferences.getInt(scoreKey(h), 0));
-                }
-                break;
-            case SHOP:
-                title = "МАГАЗИН";
-                lines.add("В первой версии всё открыто бесплатно.");
-                lines.add("Позже здесь можно добавить костюмы, пакеты, котлы и пожарные рукава.");
-                break;
-            default:
-                return;
+    private void drawSparks(Canvas canvas) {
+        for (Spark spark : sparks) {
+            int alpha = (int) (255f * Math.max(0f, Math.min(1f, spark.life / spark.maxLife)));
+            paint.setColor((spark.color & 0x00FFFFFF) | (alpha << 24));
+            canvas.drawCircle(spark.x, spark.y, spark.size, paint);
         }
-
-        drawCenteredText(canvas, title, width * 0.5f, panel.top + height * 0.075f, width * 0.058f, 0xFFFFD13A);
-        float y = panel.top + height * 0.16f;
-        for (int i = 0; i < lines.size(); i++) {
-            if (dialog == Dialog.SETTINGS && i < 2) {
-                RectF row = settingsRow(i);
-                paint.setColor(i == 0 ? 0xFF2D4935 : 0xFF29445A);
-                canvas.drawRoundRect(row, width * 0.025f, width * 0.025f, paint);
-                drawCenteredText(canvas, lines.get(i), width * 0.5f, row.centerY() + width * 0.012f, width * 0.043f, Color.WHITE);
-                y = row.bottom + height * 0.035f;
-            } else {
-                y = drawWrappedCenteredText(canvas, lines.get(i), width * 0.5f, y, panel.width() * 0.82f, width * 0.033f, Color.WHITE, height * 0.038f);
-                y += height * 0.025f;
-            }
-        }
-        drawButton(canvas, dialogCloseRect(), "ЗАКРЫТЬ", true);
-    }
-
-    private RectF settingsRow(int index) {
-        float top = height * (0.34f + index * 0.12f);
-        return new RectF(width * 0.17f, top, width * 0.83f, top + height * 0.085f);
-    }
-
-    private RectF dialogCloseRect() {
-        return new RectF(width * 0.23f, height * 0.75f, width * 0.77f, height * 0.82f);
     }
 
     private void drawShop(Canvas canvas, boolean left) {
-        float x0 = left ? 0 : width * 0.86f;
-        float x1 = left ? width * 0.14f : width;
-        paint.setColor(0xFF3A2C20);
-        canvas.drawRect(x0, height * 0.16f, x1, height * 0.80f, paint);
-        paint.setColor(0xFFB88C48);
-        canvas.drawRect(x0, height * 0.16f, x1, height * 0.20f, paint);
-        for (int i = 0; i < 5; i++) {
-            float y = height * (0.28f + i * 0.105f);
-            paint.setColor(0xFF5B4630);
-            canvas.drawRect(x0, y, x1, y + height * 0.012f, paint);
-            for (int j = 0; j < 2; j++) {
-                float bx = left ? width * (0.035f + j * 0.05f) : width * (0.89f + j * 0.05f);
-                drawBottle(canvas, bx, y - height * 0.022f, width * 0.016f, 0, false);
-            }
+        float x0 = left ? 0f : width * 0.82f;
+        float x1 = left ? width * 0.18f : width;
+        paint.setColor(0xFF2C2118);
+        canvas.drawRect(x0, height * 0.20f, x1, height * 0.72f, paint);
+        paint.setColor(0xFFB78638);
+        canvas.drawRect(x0, height * 0.20f, x1, height * 0.25f, paint);
+        paint.setColor(0xFF171A1D);
+        for (int i = 0; i < 3; i++) {
+            float y = height * (0.32f + i * 0.15f);
+            canvas.drawRect(x0, y, x1, y + height * 0.025f, paint);
+        }
+        drawText(canvas, "МАГАЗИН", (x0 + x1) * 0.5f, height * 0.235f, width * 0.026f, 0xFFFFD266);
+    }
+
+    private void drawBottleRails(Canvas canvas) {
+        for (int lane = 0; lane < 4; lane++) {
+            PointF start = bottleStart(lane);
+            PointF control = bottleControl(lane);
+            PointF end = lanePoint(lane);
+            Path path = new Path();
+            path.moveTo(start.x, start.y);
+            path.quadTo(control.x, control.y, end.x, end.y);
+            stroke.setStrokeWidth(width * 0.014f);
+            stroke.setColor(0xFF5A4630);
+            canvas.drawPath(path, stroke);
+            stroke.setStrokeWidth(width * 0.005f);
+            stroke.setColor(0xFFB99A60);
+            canvas.drawPath(path, stroke);
         }
     }
 
-    private void drawPipeNetwork(Canvas canvas) {
-        stroke.setStrokeWidth(width * 0.025f);
-        stroke.setColor(0xFF4B4F52);
-        canvas.drawLine(width * 0.12f, height * 0.25f, width * 0.88f, height * 0.25f, stroke);
-        canvas.drawLine(width * 0.12f, height * 0.25f, width * 0.12f, height * 0.73f, stroke);
-        canvas.drawLine(width * 0.88f, height * 0.25f, width * 0.88f, height * 0.73f, stroke);
-        stroke.setStrokeWidth(width * 0.008f);
-        stroke.setColor(0xFFB26E2E);
-        canvas.drawLine(width * 0.12f, height * 0.25f, width * 0.88f, height * 0.25f, stroke);
+    private void drawPipes(Canvas canvas) {
+        stroke.setStrokeWidth(width * 0.035f);
+        stroke.setColor(0xFF4B4F50);
+        canvas.drawLine(width * 0.08f, height * 0.25f, width * 0.92f, height * 0.25f, stroke);
+        canvas.drawLine(width * 0.08f, height * 0.60f, width * 0.92f, height * 0.60f, stroke);
+        stroke.setStrokeWidth(width * 0.012f);
+        stroke.setColor(0xFF9A7A45);
+        canvas.drawLine(width * 0.08f, height * 0.25f, width * 0.92f, height * 0.25f, stroke);
+        canvas.drawLine(width * 0.08f, height * 0.60f, width * 0.92f, height * 0.60f, stroke);
     }
 
-    private void drawWarehouseWindows(Canvas canvas) {
-        for (int side = 0; side < 2; side++) {
-            float left = side == 0 ? width * 0.08f : width * 0.72f;
-            for (int row = 0; row < 2; row++) {
-                RectF window = new RectF(left, height * (0.25f + row * 0.27f), left + width * 0.20f, height * (0.39f + row * 0.27f));
-                paint.setShader(new RadialGradient(window.centerX(), window.centerY(), window.width(), 0xFF476D83, 0xFF17232A, Shader.TileMode.CLAMP));
-                canvas.drawRect(window, paint);
-                paint.setShader(null);
-                stroke.setStrokeWidth(width * 0.008f);
-                stroke.setColor(0xFF566168);
-                canvas.drawRect(window, stroke);
-                canvas.drawLine(window.centerX(), window.top, window.centerX(), window.bottom, stroke);
-                canvas.drawLine(window.left, window.centerY(), window.right, window.centerY(), stroke);
+    private void drawWarehouse(Canvas canvas) {
+        paint.setColor(0x553A5E70);
+        canvas.drawRect(width * 0.08f, height * 0.20f, width * 0.92f, height * 0.72f, paint);
+        for (int row = 0; row < 2; row++) {
+            for (int col = 0; col < 4; col++) {
+                float left = width * (0.12f + col * 0.20f);
+                float top = height * (0.27f + row * 0.20f);
+                paint.setColor(0xFF18242A);
+                canvas.drawRect(left, top, left + width * 0.13f, top + height * 0.11f, paint);
+                stroke.setStrokeWidth(width * 0.004f);
+                stroke.setColor(0xFF5F879A);
+                canvas.drawRect(left, top, left + width * 0.13f, top + height * 0.11f, stroke);
             }
         }
     }
 
     private PointF lanePoint(int lane) {
-        float x = lane < 2 ? width * 0.20f : width * 0.80f;
-        float y = lane % 2 == 0 ? height * 0.39f : height * 0.66f;
+        float x = lane < 2 ? width * 0.23f : width * 0.77f;
+        float y = lane % 2 == 0 ? height * 0.34f : height * 0.61f;
         return new PointF(x, y);
     }
 
     private PointF bottleStart(int lane) {
-        float x = lane < 2 ? width * 0.09f : width * 0.91f;
-        float y = lane % 2 == 0 ? height * 0.20f : height * 0.43f;
+        boolean left = lane < 2;
+        float x = left ? width * 0.07f : width * 0.93f;
+        float y = lane % 2 == 0 ? height * 0.29f : height * 0.51f;
         return new PointF(x, y);
     }
 
     private PointF bottleControl(int lane) {
-        PointF start = bottleStart(lane);
+        boolean left = lane < 2;
         PointF end = lanePoint(lane);
-        float cx = (start.x + end.x) * 0.5f;
-        float cy = Math.min(start.y, end.y) - height * 0.035f;
-        return new PointF(cx, cy);
+        return new PointF(left ? width * 0.14f : width * 0.86f, end.y - height * 0.08f);
     }
 
-    private PointF quadraticPoint(PointF a, PointF b, PointF c, float t) {
-        float clamped = Math.max(0f, Math.min(1.15f, t));
-        float inv = 1f - clamped;
+    private PointF quadratic(PointF a, PointF b, PointF c, float t) {
+        float clamped = Math.max(0f, Math.min(1f, t));
+        float one = 1f - clamped;
         return new PointF(
-                inv * inv * a.x + 2f * inv * clamped * b.x + clamped * clamped * c.x,
-                inv * inv * a.y + 2f * inv * clamped * b.y + clamped * clamped * c.y
+                one * one * a.x + 2f * one * clamped * b.x + clamped * clamped * c.x,
+                one * one * a.y + 2f * one * clamped * b.y + clamped * clamped * c.y
         );
-    }
-
-    private void createSuccessParticles(float x, float y, boolean special) {
-        int count = special ? 18 : 10;
-        int color = special ? 0xFFFFD32E : heroColor(hero);
-        for (int i = 0; i < count; i++) {
-            float angle = (float) (random.nextDouble() * Math.PI * 2.0);
-            float speed = width * (0.10f + random.nextFloat() * 0.15f);
-            particles.add(new Particle(
-                    x,
-                    y,
-                    (float) Math.cos(angle) * speed,
-                    (float) Math.sin(angle) * speed,
-                    height * 0.25f,
-                    0.45f + random.nextFloat() * 0.35f,
-                    width * (0.006f + random.nextFloat() * 0.009f),
-                    color,
-                    random.nextFloat() * 360f,
-                    -280f + random.nextFloat() * 560f
-            ));
-        }
-    }
-
-    private void createMissParticles(float x, float y, int color) {
-        for (int i = 0; i < 18; i++) {
-            float angle = (float) (Math.PI * (0.15 + random.nextDouble() * 0.70));
-            float speed = width * (0.11f + random.nextFloat() * 0.18f);
-            particles.add(new Particle(
-                    x,
-                    y,
-                    (float) Math.cos(angle) * speed * (random.nextBoolean() ? 1f : -1f),
-                    (float) -Math.sin(angle) * speed,
-                    height * 0.55f,
-                    0.6f + random.nextFloat() * 0.45f,
-                    width * (0.007f + random.nextFloat() * 0.011f),
-                    color,
-                    random.nextFloat() * 360f,
-                    -360f + random.nextFloat() * 720f
-            ));
-        }
     }
 
     private void drawBottle(Canvas canvas, float x, float y, float size, float rotation, boolean golden) {
         canvas.save();
-        canvas.rotate(rotation, x, y);
-        int body = golden ? 0xFFFFC52E : 0xFF4EA962;
-        int light = golden ? 0xFFFFE27A : 0xFF9EE0A8;
-        paint.setColor(body);
-        RectF bottle = new RectF(x - size * 0.45f, y - size * 1.05f, x + size * 0.45f, y + size * 1.05f);
-        canvas.drawRoundRect(bottle, size * 0.35f, size * 0.35f, paint);
-        paint.setColor(light);
-        canvas.drawRoundRect(new RectF(x - size * 0.34f, y - size * 0.88f, x - size * 0.08f, y + size * 0.62f), size * 0.13f, size * 0.13f, paint);
-        paint.setColor(0xFF313536);
-        canvas.drawRoundRect(new RectF(x - size * 0.25f, y - size * 1.38f, x + size * 0.25f, y - size * 0.88f), size * 0.10f, size * 0.10f, paint);
-        paint.setColor(0xFFEEE5C9);
-        canvas.drawRect(x - size * 0.40f, y - size * 0.10f, x + size * 0.40f, y + size * 0.28f, paint);
+        canvas.translate(x, y);
+        canvas.rotate(rotation);
+        paint.setColor(golden ? 0xFFFFC928 : 0xFF4CAB63);
+        canvas.drawRoundRect(new RectF(-size * 0.38f, -size, size * 0.38f, size), size * 0.18f, size * 0.18f, paint);
+        paint.setColor(golden ? 0xFFFFE881 : 0xFFA9E3B2);
+        canvas.drawRect(-size * 0.19f, -size * 1.23f, size * 0.19f, -size * 0.82f, paint);
+        paint.setColor(0x55FFFFFF);
+        canvas.drawRoundRect(new RectF(-size * 0.25f, -size * 0.82f, -size * 0.08f, size * 0.68f), size * 0.08f, size * 0.08f, paint);
         canvas.restore();
     }
 
-    private void drawBag(Canvas canvas, float x, float y, float size, boolean opensRight) {
+    private void drawBag(Canvas canvas, float x, float y, float size, boolean openingRight) {
+        canvas.save();
+        canvas.translate(x, y);
+        canvas.rotate(openingRight ? 12f : -12f);
         Path bag = new Path();
-        bag.moveTo(x - size * 0.55f, y - size * 0.20f);
-        bag.quadTo(x - size * 0.45f, y + size * 0.55f, x, y + size * 0.62f);
-        bag.quadTo(x + size * 0.45f, y + size * 0.55f, x + size * 0.55f, y - size * 0.20f);
-        bag.quadTo(x, y - size * 0.42f, x - size * 0.55f, y - size * 0.20f);
-        paint.setColor(0xFFB7894E);
+        bag.moveTo(-size * 0.55f, -size * 0.25f);
+        bag.quadTo(0f, -size * 0.55f, size * 0.55f, -size * 0.25f);
+        bag.lineTo(size * 0.40f, size * 0.55f);
+        bag.quadTo(0f, size * 0.75f, -size * 0.40f, size * 0.55f);
+        bag.close();
+        paint.setColor(0xFF9A713B);
         canvas.drawPath(bag, paint);
         stroke.setStrokeWidth(size * 0.08f);
-        stroke.setColor(0xFF5B3D21);
+        stroke.setColor(0xFF3E2B19);
         canvas.drawPath(bag, stroke);
-        stroke.setStrokeWidth(size * 0.045f);
-        canvas.drawLine(x - size * 0.42f, y - size * 0.08f, x + size * 0.42f, y - size * 0.08f, stroke);
-        drawCenteredText(canvas, opensRight ? "▶" : "◀", x, y + size * 0.28f, size * 0.28f, 0xFF5B3D21);
+        stroke.setStrokeWidth(size * 0.05f);
+        canvas.drawLine(-size * 0.48f, -size * 0.28f, size * 0.48f, -size * 0.28f, stroke);
+        canvas.restore();
     }
 
-    private void drawCauldron(Canvas canvas, float x, float y, float size, float remaining) {
-        paint.setColor(0xFF1E2224);
-        RectF body = new RectF(x - size, y - size * 0.35f, x + size, y + size * 0.72f);
-        canvas.drawRoundRect(body, size * 0.32f, size * 0.32f, paint);
-        paint.setColor(0xFF555D60);
-        canvas.drawOval(new RectF(x - size * 1.05f, y - size * 0.55f, x + size * 1.05f, y - size * 0.05f), paint);
-        paint.setColor(0xFFFF8B24);
-        canvas.drawOval(new RectF(x - size * 0.82f, y - size * 0.43f, x + size * 0.82f, y - size * 0.14f), paint);
-        stroke.setStrokeWidth(size * 0.16f);
-        stroke.setColor(0xFF777F82);
-        canvas.drawArc(new RectF(x - size * 1.35f, y - size * 0.20f, x - size * 0.70f, y + size * 0.55f), 80, 210, false, stroke);
-        canvas.drawArc(new RectF(x + size * 0.70f, y - size * 0.20f, x + size * 1.35f, y + size * 0.55f), -110, 210, false, stroke);
-        drawFire(canvas, x, y + size * 0.90f, size * 0.62f, remaining);
-        drawCountdownRing(canvas, x, y, size * 1.38f, remaining, 0xFFFFB431);
+    private void drawCauldron(Canvas canvas, float x, float y, float size, float remain) {
+        float alpha = 0.75f + remain * 0.25f;
+        paint.setColor(((int) (alpha * 255f) << 24) | 0x00272B2E);
+        canvas.drawOval(new RectF(x - size, y - size * 0.35f, x + size, y + size * 0.55f), paint);
+        paint.setColor(0xFFFF7A18);
+        canvas.drawOval(new RectF(x - size * 0.78f, y - size * 0.30f, x + size * 0.78f, y + size * 0.03f), paint);
+        stroke.setStrokeWidth(size * 0.12f);
+        stroke.setColor(0xFF0F1113);
+        canvas.drawOval(new RectF(x - size, y - size * 0.35f, x + size, y + size * 0.55f), stroke);
+        drawFlameShape(canvas, x - size * 0.42f, y + size * 0.75f, size * 0.45f, 0xFFFFB31A);
+        drawFlameShape(canvas, x + size * 0.25f, y + size * 0.76f, size * 0.38f, 0xFFFF5D19);
     }
 
-    private void drawFire(Canvas canvas, float x, float y, float size, float remaining) {
-        Path outer = new Path();
-        outer.moveTo(x, y - size * 1.25f);
-        outer.cubicTo(x + size * 0.95f, y - size * 0.40f, x + size * 0.72f, y + size * 0.88f, x, y + size);
-        outer.cubicTo(x - size * 0.72f, y + size * 0.88f, x - size * 0.95f, y - size * 0.15f, x - size * 0.28f, y - size * 0.58f);
-        outer.cubicTo(x - size * 0.12f, y - size * 0.18f, x + size * 0.10f, y - size * 0.62f, x, y - size * 1.25f);
-        paint.setColor(0xFFFF4C24);
-        canvas.drawPath(outer, paint);
-
-        Path inner = new Path();
-        inner.moveTo(x, y - size * 0.60f);
-        inner.cubicTo(x + size * 0.45f, y - size * 0.10f, x + size * 0.38f, y + size * 0.60f, x, y + size * 0.72f);
-        inner.cubicTo(x - size * 0.40f, y + size * 0.55f, x - size * 0.35f, y + size * 0.02f, x, y - size * 0.60f);
-        paint.setColor(0xFFFFC52D);
-        canvas.drawPath(inner, paint);
-        drawCountdownRing(canvas, x, y, size * 1.48f, remaining, 0xFF58D9FF);
+    private void drawFire(Canvas canvas, float x, float y, float size, float remain) {
+        float flicker = 0.88f + (float) Math.sin(worldTime * 14f + x) * 0.10f;
+        drawFlameShape(canvas, x, y, size * flicker, 0xFFFF4C18);
+        drawFlameShape(canvas, x, y + size * 0.12f, size * 0.62f * flicker, 0xFFFFC21A);
+        stroke.setStrokeWidth(size * 0.08f);
+        stroke.setColor(((int) (remain * 170f) << 24) | 0x00FFFFFF);
+        canvas.drawCircle(x, y, size * 1.20f, stroke);
     }
 
-    private void drawCountdownRing(Canvas canvas, float x, float y, float radius, float remaining, int color) {
-        stroke.setStrokeWidth(Math.max(4f, width * 0.011f));
-        stroke.setColor(0x44FFFFFF);
-        canvas.drawCircle(x, y, radius, stroke);
-        stroke.setColor(color);
-        canvas.drawArc(new RectF(x - radius, y - radius, x + radius, y + radius), -90f, 360f * Math.max(0f, remaining), false, stroke);
+    private void drawFlameShape(Canvas canvas, float x, float y, float size, int color) {
+        Path flame = new Path();
+        flame.moveTo(x, y - size);
+        flame.cubicTo(x + size * 0.60f, y - size * 0.20f, x + size * 0.75f, y + size * 0.45f, x, y + size);
+        flame.cubicTo(x - size * 0.75f, y + size * 0.45f, x - size * 0.45f, y - size * 0.10f, x, y - size);
+        paint.setColor(color);
+        canvas.drawPath(flame, paint);
     }
 
     private void drawLog(Canvas canvas, float x, float y, float size, float rotation) {
         canvas.save();
-        canvas.rotate(rotation, x, y);
-        paint.setColor(0xFF8A5128);
-        RectF body = new RectF(x - size, y - size * 0.32f, x + size, y + size * 0.32f);
-        canvas.drawRoundRect(body, size * 0.25f, size * 0.25f, paint);
-        paint.setColor(0xFFBC7A3C);
-        canvas.drawOval(new RectF(x - size * 1.05f, y - size * 0.34f, x - size * 0.62f, y + size * 0.34f), paint);
-        canvas.drawOval(new RectF(x + size * 0.62f, y - size * 0.34f, x + size * 1.05f, y + size * 0.34f), paint);
-        stroke.setStrokeWidth(size * 0.07f);
-        stroke.setColor(0xFF633516);
-        canvas.drawLine(x - size * 0.35f, y - size * 0.22f, x + size * 0.30f, y + size * 0.16f, stroke);
-        canvas.drawLine(x - size * 0.12f, y + size * 0.20f, x + size * 0.45f, y - size * 0.12f, stroke);
+        canvas.translate(x, y);
+        canvas.rotate(rotation);
+        paint.setColor(0xFF8B5527);
+        canvas.drawRoundRect(new RectF(-size, -size * 0.28f, size, size * 0.28f), size * 0.22f, size * 0.22f, paint);
+        paint.setColor(0xFFD39A55);
+        canvas.drawOval(new RectF(size * 0.72f, -size * 0.28f, size * 1.08f, size * 0.28f), paint);
+        stroke.setStrokeWidth(size * 0.08f);
+        stroke.setColor(0xFF4A2A16);
+        canvas.drawLine(-size * 0.55f, -size * 0.15f, size * 0.45f, size * 0.10f, stroke);
         canvas.restore();
     }
 
-    private void drawHoseNozzle(Canvas canvas, float x, float y, float size, float rotation) {
-        canvas.save();
-        canvas.rotate(rotation, x, y);
-        paint.setColor(0xFF1A2024);
-        canvas.drawRoundRect(new RectF(x - size, y - size * 0.22f, x + size * 0.60f, y + size * 0.22f), size * 0.15f, size * 0.15f, paint);
-        paint.setColor(0xFF89979D);
-        canvas.drawRoundRect(new RectF(x + size * 0.45f, y - size * 0.30f, x + size, y + size * 0.30f), size * 0.12f, size * 0.12f, paint);
-        stroke.setStrokeWidth(size * 0.30f);
-        stroke.setColor(0xFF273137);
-        canvas.drawArc(new RectF(x - size * 1.35f, y - size * 0.1f, x - size * 0.25f, y + size * 1.1f), 160, 120, false, stroke);
-        canvas.restore();
+    private Bitmap currentHead() {
+        if (hero == Hero.RAK) {
+            return headRak;
+        }
+        if (hero == Hero.KOROLEV) {
+            return headKorolev;
+        }
+        return headLozhkin;
     }
 
-    private void drawPanel(Canvas canvas, RectF rect, int borderColor, int fillColor, float borderWidth) {
-        paint.setColor(0x55000000);
-        canvas.drawRoundRect(new RectF(rect.left + borderWidth, rect.top + borderWidth * 1.6f, rect.right + borderWidth, rect.bottom + borderWidth * 1.6f), borderWidth * 2.2f, borderWidth * 2.2f, paint);
+    private int heroBodyColor() {
+        if (hero == Hero.RAK) {
+            return 0xFFF0C42C;
+        }
+        if (hero == Hero.KOROLEV) {
+            return 0xFF53624E;
+        }
+        return 0xFF59704C;
+    }
+
+    private int heroAccent() {
+        if (hero == Hero.RAK) {
+            return 0xFFFFC928;
+        }
+        if (hero == Hero.KOROLEV) {
+            return 0xFF50B9F2;
+        }
+        return 0xFF8BC34A;
+    }
+
+    private void drawPanel(Canvas canvas, RectF rect, int borderColor, int fillColor, float border) {
         paint.setColor(fillColor);
-        canvas.drawRoundRect(rect, borderWidth * 2.2f, borderWidth * 2.2f, paint);
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(borderWidth);
+        canvas.drawRoundRect(rect, width * 0.03f, width * 0.03f, paint);
+        stroke.setStrokeWidth(border);
         stroke.setColor(borderColor);
-        canvas.drawRoundRect(rect, borderWidth * 2.2f, borderWidth * 2.2f, stroke);
+        canvas.drawRoundRect(rect, width * 0.03f, width * 0.03f, stroke);
     }
 
-    private void drawButton(Canvas canvas, RectF rect, String label, boolean green) {
-        int top = green ? 0xFF78C82E : 0xFF515A61;
-        int bottom = green ? 0xFF2D781A : 0xFF252B2F;
-        paint.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, top, bottom, Shader.TileMode.CLAMP));
-        canvas.drawRoundRect(rect, rect.height() * 0.25f, rect.height() * 0.25f, paint);
-        paint.setShader(null);
-        stroke.setStrokeWidth(Math.max(3f, width * 0.008f));
-        stroke.setColor(green ? 0xFFDFFF7B : 0xFF9DA6AC);
-        canvas.drawRoundRect(rect, rect.height() * 0.25f, rect.height() * 0.25f, stroke);
-        drawCenteredText(canvas, label, rect.centerX(), rect.centerY() + rect.height() * 0.12f, Math.min(width * 0.045f, rect.height() * 0.42f), Color.WHITE);
+    private void drawButton(Canvas canvas, RectF rect, String label, boolean primary) {
+        paint.setColor(primary ? 0xFF55A82D : 0xFF2A3035);
+        canvas.drawRoundRect(rect, width * 0.025f, width * 0.025f, paint);
+        stroke.setStrokeWidth(width * 0.007f);
+        stroke.setColor(primary ? 0xFFBCEB62 : 0xFF767E84);
+        canvas.drawRoundRect(rect, width * 0.025f, width * 0.025f, stroke);
+        drawText(canvas, label, rect.centerX(), rect.centerY() + width * 0.016f, width * 0.045f, Color.WHITE);
     }
 
-    private void drawSmallButton(Canvas canvas, RectF rect, String label) {
-        paint.setColor(0xFF252A2F);
-        canvas.drawRoundRect(rect, rect.height() * 0.22f, rect.height() * 0.22f, paint);
-        stroke.setStrokeWidth(Math.max(3f, width * 0.007f));
-        stroke.setColor(0xFFFFC32D);
-        canvas.drawRoundRect(rect, rect.height() * 0.22f, rect.height() * 0.22f, stroke);
-        drawCenteredText(canvas, label, rect.centerX(), rect.centerY() + rect.height() * 0.14f, rect.height() * 0.46f, Color.WHITE);
-    }
-
-    private void drawCenteredText(Canvas canvas, String value, float x, float baseline, float size, int color) {
-        text.setTextSize(Math.max(10f, size));
+    private void drawText(Canvas canvas, String value, float x, float y, float size, int color) {
+        text.setTextSize(size);
         text.setColor(color);
-        text.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText(value, x, baseline, text);
+        text.setStyle(Paint.Style.FILL);
+        canvas.drawText(value, x, y, text);
     }
 
-    private float drawWrappedCenteredText(Canvas canvas, String value, float centerX, float startY, float maxWidth, float size, int color, float lineHeight) {
-        smallText.setTextSize(Math.max(10f, size));
-        smallText.setColor(color);
-        smallText.setTextAlign(Paint.Align.CENTER);
-        String[] words = value.split(" ");
-        StringBuilder line = new StringBuilder();
-        float y = startY;
-        for (String word : words) {
-            String candidate = line.length() == 0 ? word : line + " " + word;
-            if (smallText.measureText(candidate) > maxWidth && line.length() > 0) {
-                canvas.drawText(line.toString(), centerX, y, smallText);
-                y += lineHeight;
-                line.setLength(0);
-                line.append(word);
-            } else {
-                line.setLength(0);
-                line.append(candidate);
-            }
-        }
-        if (line.length() > 0) {
-            canvas.drawText(line.toString(), centerX, y, smallText);
-            y += lineHeight;
-        }
-        return y;
-    }
-
-    private int heroColor(Hero h) {
-        if (h == Hero.LOZHKIN) {
-            return 0xFF6BB24A;
-        }
-        if (h == Hero.RAK) {
-            return 0xFFFFBE2D;
-        }
-        return 0xFF39A8E1;
-    }
-
-    private void softTone(int tone, int duration) {
-        if (!soundEnabled) {
-            return;
-        }
-        createToneGenerator();
-        if (toneGenerator != null) {
-            try {
-                toneGenerator.startTone(tone, duration);
-            } catch (RuntimeException ignored) {
-                // Audio is optional; gameplay must never crash because of it.
-            }
-        }
-    }
-
-    private void vibrate(long milliseconds) {
-        if (!vibrationEnabled) {
-            return;
-        }
-        try {
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            if (vibrator != null && vibrator.hasVibrator()) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createOneShot(milliseconds, VibrationEffect.DEFAULT_AMPLITUDE));
-                } else {
-                    vibrator.vibrate(milliseconds);
-                }
-            }
-        } catch (RuntimeException ignored) {
-            // Haptics are optional.
-        }
+    @Override
+    public boolean performClick() {
+        super.performClick();
+        return true;
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+            performClick();
+            return true;
+        }
         if (event.getActionMasked() != MotionEvent.ACTION_DOWN) {
             return true;
         }
         float x = event.getX();
         float y = event.getY();
 
-        if (dialog != Dialog.NONE) {
-            handleDialogTouch(x, y);
-            return true;
-        }
-
         if (screen == Screen.MENU) {
-            if (menuDst.width() <= 0f) {
-                menuDst.set(0f, 0f, width, height);
-            }
             handleMenuTouch(x, y);
             return true;
         }
 
-        if (screen != Screen.PLAYING) {
+        if (screen == Screen.COUNTDOWN) {
+            return true;
+        }
+
+        if (screen == Screen.PAUSED || screen == Screen.LEVEL_DONE || screen == Screen.GAME_OVER || screen == Screen.VICTORY) {
             handleOverlayTouch(x, y);
             return true;
         }
@@ -1405,202 +1113,119 @@ public final class GameView extends View implements Runnable {
                 goToMenu();
             } else if (x > width * 0.82f) {
                 screen = Screen.PAUSED;
-                softTone(ToneGenerator.TONE_PROP_BEEP2, 60);
             }
             return true;
         }
 
-        int lane = laneFromTouch(x, y);
-        if (hero == Hero.LOZHKIN) {
-            selectedLane = lane;
-            softTone(ToneGenerator.TONE_PROP_PROMPT, 25);
-            vibrate(16);
-        } else {
-            performPromptAction(lane);
-        }
+        performAction(laneFromTouch(x, y));
         return true;
     }
 
     private void handleMenuTouch(float x, float y) {
-        if (menuDst.width() <= 0f || !menuDst.contains(x, y)) {
+        if (menuRect.width() <= 0f || !menuRect.contains(x, y)) {
             return;
         }
-        float sourceWidth = menuBitmap != null && !menuBitmap.isRecycled() ? menuBitmap.getWidth() : 941f;
-        float sourceHeight = menuBitmap != null && !menuBitmap.isRecycled() ? menuBitmap.getHeight() : 1672f;
-        float sx = (x - menuDst.left) * sourceWidth / menuDst.width();
-        float sy = (y - menuDst.top) * sourceHeight / menuDst.height();
+        float sx = (x - menuRect.left) * 720f / menuRect.width();
+        float sy = (y - menuRect.top) * 1280f / menuRect.height();
 
-        if (sx < 125 && sy < 140) {
-            dialog = Dialog.SETTINGS;
-            return;
-        }
-        if (sx > 815 && sy < 140) {
-            dialog = Dialog.INFO;
-            return;
-        }
-
-        if (sy > 500 && sy < 1435) {
-            if (sx < 310) {
-                startHero(Hero.LOZHKIN);
-                return;
-            }
-            if (sx < 620) {
-                startHero(Hero.RAK);
-                return;
-            }
-            startHero(Hero.KOROLEV);
-            return;
-        }
-
-        if (sy > 1490) {
-            if (sx < 235) {
-                dialog = Dialog.RECORDS;
-            } else if (sx < 470) {
-                dialog = Dialog.ACHIEVEMENTS;
-            } else if (sx < 705) {
-                dialog = Dialog.RATING;
+        if (sy >= 380f && sy <= 1095f) {
+            if (sx < 240f) {
+                selectHero(Hero.LOZHKIN);
+            } else if (sx < 480f) {
+                selectHero(Hero.RAK);
             } else {
-                dialog = Dialog.SHOP;
+                selectHero(Hero.KOROLEV);
             }
+            return;
         }
-    }
 
-    private void handleDialogTouch(float x, float y) {
-        if (dialog == Dialog.SETTINGS) {
-            if (settingsRow(0).contains(x, y)) {
-                soundEnabled = !soundEnabled;
-                preferences.edit().putBoolean(KEY_SOUND, soundEnabled).apply();
-                if (soundEnabled) {
-                    createToneGenerator();
-                    softTone(ToneGenerator.TONE_PROP_ACK, 80);
-                } else {
-                    releaseToneGenerator();
-                }
-                return;
-            }
-            if (settingsRow(1).contains(x, y)) {
-                vibrationEnabled = !vibrationEnabled;
-                preferences.edit().putBoolean(KEY_VIBRATION, vibrationEnabled).apply();
-                if (vibrationEnabled) {
-                    vibrate(35);
-                }
-                return;
-            }
-        }
-        if (dialogCloseRect().contains(x, y)) {
-            dialog = Dialog.NONE;
-            softTone(ToneGenerator.TONE_PROP_BEEP, 40);
+        if (sy < 120f) {
+            menuNotice = sx < 360f ? "Звук и вибрация будут добавлены после проверки игры" : "Выбери героя и пройди 10 уровней";
+            menuNoticeUntil = SystemClock.uptimeMillis() + 2400L;
+        } else if (sy > 1110f) {
+            menuNotice = "Раздел откроется в следующем обновлении";
+            menuNoticeUntil = SystemClock.uptimeMillis() + 2200L;
         }
     }
 
     private void handleOverlayTouch(float x, float y) {
-        if (overlayPrimaryRect().contains(x, y)) {
-            if (screen == Screen.READY) {
-                beginPlaying();
-            } else if (screen == Screen.PAUSED) {
+        if (primaryButton().contains(x, y)) {
+            if (screen == Screen.PAUSED) {
                 screen = Screen.PLAYING;
-                lastSpawnTime = SystemClock.uptimeMillis();
-            } else if (screen == Screen.LEVEL_COMPLETE) {
-                startNextLevel();
+                lastSpawnMs = SystemClock.uptimeMillis();
+            } else if (screen == Screen.LEVEL_DONE) {
+                nextLevel();
             } else {
-                retryCurrentHero();
+                retryHero();
             }
             return;
         }
-        if (overlaySecondaryRect().contains(x, y)) {
+        if (secondaryButton().contains(x, y)) {
             goToMenu();
         }
     }
 
     private int laneFromTouch(float x, float y) {
         boolean left = x < width * 0.5f;
-        boolean upper = y < height * 0.58f;
+        boolean top = y < height * 0.49f;
+        if (left && top) {
+            return 0;
+        }
         if (left) {
-            return upper ? 0 : 1;
+            return 1;
         }
-        return upper ? 2 : 3;
+        if (top) {
+            return 2;
+        }
+        return 3;
     }
 
-    private void performPromptAction(int lane) {
-        PromptItem match = null;
-        for (PromptItem item : prompts) {
-            if (item.lane == lane && (match == null || item.age > match.age)) {
-                match = item;
-            }
-        }
-        if (match == null) {
-            wrongUntil = SystemClock.uptimeMillis() + 90;
-            softTone(ToneGenerator.TONE_PROP_NACK, 40);
-            return;
-        }
-        prompts.remove(match);
-        actionEffects.add(new ActionEffect(lane, hero == Hero.KOROLEV));
-        onSuccess(lane, 1, false);
-    }
-
-    private static final class MovingItem {
+    private static final class Bottle {
         final int lane;
-        final float durationSeconds;
+        final float duration;
         final boolean golden;
-        float progress;
+        float t;
         float rotation;
 
-        MovingItem(int lane, float durationSeconds, boolean golden) {
+        Bottle(int lane, float duration, boolean golden) {
             this.lane = lane;
-            this.durationSeconds = durationSeconds;
+            this.duration = duration;
             this.golden = golden;
         }
     }
 
-    private static final class PromptItem {
+    private static final class Target {
         final int lane;
-        final float lifeSeconds;
+        final float life;
         float age;
 
-        PromptItem(int lane, float lifeSeconds) {
+        Target(int lane, float life) {
             this.lane = lane;
-            this.lifeSeconds = lifeSeconds;
+            this.life = life;
         }
     }
 
-    private static final class Particle {
+    private static final class Spark {
         float x;
         float y;
         float vx;
         float vy;
-        final float gravity;
+        final float size;
         float life;
         final float maxLife;
-        final float size;
         final int color;
-        float rotation;
-        final float spin;
+        final float gravity;
 
-        Particle(float x, float y, float vx, float vy, float gravity, float life, float size, int color, float rotation, float spin) {
+        Spark(float x, float y, float vx, float vy, float size, float life, int color, float gravity) {
             this.x = x;
             this.y = y;
             this.vx = vx;
             this.vy = vy;
-            this.gravity = gravity;
+            this.size = size;
             this.life = life;
             this.maxLife = life;
-            this.size = size;
             this.color = color;
-            this.rotation = rotation;
-            this.spin = spin;
-        }
-    }
-
-    private static final class ActionEffect {
-        final int lane;
-        final boolean water;
-        final float life;
-        float age;
-
-        ActionEffect(int lane, boolean water) {
-            this.lane = lane;
-            this.water = water;
-            this.life = water ? 0.34f : 0.48f;
+            this.gravity = gravity;
         }
     }
 }

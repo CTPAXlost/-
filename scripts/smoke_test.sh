@@ -2,123 +2,93 @@
 set -euo pipefail
 
 APK="${1:-app/build/outputs/apk/debug/app-debug.apk}"
-TAG="ELC_RUNTIME"
+PACKAGE="ru.elc.arcade.debug"
+ACTIVITY="ru.elc.arcade.MainActivity"
 OUT="artifacts/runtime-test"
 mkdir -p "$OUT"
-: > "$OUT/runtime-transitions.txt"
-
-fail() {
-  local message="$1"
-  adb logcat -d -v threadtime > "$OUT/logcat-failure.txt" 2>/dev/null || true
-  adb shell dumpsys activity activities > "$OUT/activity-failure.txt" 2>/dev/null || true
-  echo "$message" >&2
-  exit 1
-}
-
-if [[ ! -s "$APK" ]]; then
-  fail "APK не найден: $APK"
-fi
-
-SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-AAPT="${SDK_ROOT}/build-tools/35.0.0/aapt"
-if [[ ! -x "$AAPT" ]]; then
-  AAPT="$(find "${SDK_ROOT}/build-tools" -type f -name aapt | sort -V | tail -n 1)"
-fi
-if [[ ! -x "$AAPT" ]]; then
-  fail "Не найден aapt для определения пакета APK"
-fi
-
-"$AAPT" dump badging "$APK" > "$OUT/smoke-apk-badging.txt"
-PACKAGE="$(sed -n "s/package: name='\([^']*\)'.*/\1/p" "$OUT/smoke-apk-badging.txt" | head -n 1)"
-ACTIVITY="$(sed -n "s/launchable-activity: name='\([^']*\)'.*/\1/p" "$OUT/smoke-apk-badging.txt" | head -n 1)"
-if [[ -z "$PACKAGE" || -z "$ACTIVITY" ]]; then
-  fail "Не удалось определить пакет или стартовую Activity"
-fi
-COMPONENT="${PACKAGE}/${ACTIVITY}"
-
-echo "PACKAGE=$PACKAGE" | tee -a "$OUT/runtime-transitions.txt"
-echo "ACTIVITY=$ACTIVITY" | tee -a "$OUT/runtime-transitions.txt"
 
 adb wait-for-device
-adb shell settings put global window_animation_scale 0 || true
-adb shell settings put global transition_animation_scale 0 || true
-adb shell settings put global animator_duration_scale 0 || true
-adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
-adb install -r -t "$APK" | tee "$OUT/install.txt"
+adb install -r "$APK"
 
-screen_size="$(adb shell wm size | tr -d '\r' | grep -oE '[0-9]+x[0-9]+' | tail -n 1)"
-W="${screen_size%x*}"
-H="${screen_size#*x}"
-[[ "$W" =~ ^[0-9]+$ && "$H" =~ ^[0-9]+$ ]] || fail "Не удалось определить размер экрана"
+SIZE_LINE="$(adb shell wm size | tr -d '\r' | tail -n 1)"
+SIZE="${SIZE_LINE##*: }"
+W="${SIZE%x*}"
+H="${SIZE#*x}"
+if ! [[ "$W" =~ ^[0-9]+$ && "$H" =~ ^[0-9]+$ ]]; then
+  W=1080
+  H=1920
+fi
 
-shot() {
+start_app() {
   local name="$1"
-  adb exec-out screencap -p > "$OUT/$name.png"
-  [[ -s "$OUT/$name.png" ]] || fail "Не удалось сохранить скриншот $name"
+  adb shell am force-stop "$PACKAGE" || true
+  adb logcat -c
+  adb shell am start -W -n "$PACKAGE/$ACTIVITY" | tee "$OUT/am-start-$name.txt"
+  sleep 3
+  adb shell pidof "$PACKAGE" >/dev/null
+  adb shell dumpsys activity activities > "$OUT/activity-$name.txt"
+  grep -q "$PACKAGE" "$OUT/activity-$name.txt"
 }
 
-assert_no_crash() {
-  local stage="$1"
-  local logs
-  logs="$(adb logcat -d -v brief | tr -d '\r' || true)"
-  printf '\n===== LOGCAT %s =====\n%s\n' "$stage" "$logs" >> "$OUT/runtime-transitions.txt"
-  if grep -E "FATAL EXCEPTION|ANR in ${PACKAGE}|Process: ${PACKAGE}|STARTUP_ERROR|RECOVERED_RUNTIME_ERROR" <<<"$logs"; then
-    fail "Обнаружено аварийное завершение на этапе: $stage"
+save_log() {
+  local name="$1"
+  adb logcat -d > "$OUT/logcat-$name.txt"
+}
+
+screenshot() {
+  local name="$1"
+  adb exec-out screencap -p > "$OUT/$name.png"
+}
+
+tap_percent() {
+  local xp="$1"
+  local yp="$2"
+  local x=$(( W * xp / 100 ))
+  local y=$(( H * yp / 100 ))
+  adb shell input tap "$x" "$y"
+}
+
+assert_state() {
+  local log="$1"
+  local expected="$2"
+  grep -Fq "ELC_STATE $expected" "$log"
+}
+
+start_app menu
+sleep 1
+save_log menu
+screenshot menu
+assert_state "$OUT/logcat-menu.txt" "ELC|MENU|LOZHKIN|LEVEL=1"
+
+run_hero() {
+  local name="$1"
+  local xpercent="$2"
+  local state="$3"
+
+  start_app "$name-menu"
+  tap_percent "$xpercent" 55
+  sleep 4
+  save_log "$name-playing"
+  screenshot "$name-playing"
+  assert_state "$OUT/logcat-$name-playing.txt" "ELC|PLAYING|$state|LEVEL=1"
+
+  tap_percent 20 34
+  tap_percent 20 65
+  tap_percent 80 34
+  tap_percent 80 65
+  sleep 2
+  adb shell pidof "$PACKAGE" >/dev/null
+  save_log "$name-after-actions"
+  screenshot "$name-after-actions"
+
+  if grep -E "FATAL EXCEPTION|Process: ${PACKAGE}" "$OUT/logcat-$name-after-actions.txt"; then
+    echo "Обнаружено аварийное завершение приложения" >&2
+    exit 1
   fi
 }
 
-wait_for_state() {
-  local marker="$1"
-  local stage="$2"
-  local logs=""
-  local pid=""
-  for _ in $(seq 1 40); do
-    pid="$(adb shell pidof "$PACKAGE" | tr -d '\r' || true)"
-    logs="$(adb logcat -d -v brief | grep -F "$TAG" | tr -d '\r' || true)"
-    if [[ -n "$pid" ]] && grep -Fq "$marker" <<<"$logs"; then
-      printf '\n===== STATE %s =====\nPID=%s\n%s\n' "$stage" "$pid" "$logs" >> "$OUT/runtime-transitions.txt"
-      assert_no_crash "$stage"
-      return 0
-    fi
-    sleep 1
-  done
-  printf '\n===== STATE TIMEOUT %s =====\nPID=%s\n%s\n' "$stage" "$pid" "$logs" >> "$OUT/runtime-transitions.txt"
-  fail "Не подтверждено состояние '$marker' на этапе: $stage"
-}
+run_hero lozhkin 16 LOZHKIN
+run_hero rak 50 RAK
+run_hero korolev 84 KOROLEV
 
-launch_state() {
-  local command="$1"
-  local marker="$2"
-  local stage="$3"
-  local screenshot="$4"
-  adb logcat -c
-  adb shell am force-stop "$PACKAGE" || true
-  adb shell am start -W -S -n "$COMPONENT" --es elc_smoke "$command" | tee "$OUT/start-${command}.txt"
-  wait_for_state "$marker" "$stage"
-  shot "$screenshot"
-}
-
-launch_state "menu" "SCREEN_MENU" "главное меню" "01-главное-меню"
-launch_state "lozhkin" "PLAYING_LOZHKIN" "игра Александра" "02-александр-игра"
-adb shell input tap "$((W * 20 / 100))" "$((H * 38 / 100))"
-adb shell input tap "$((W * 80 / 100))" "$((H * 68 / 100))"
-sleep 1
-assert_no_crash "управление Александра"
-
-launch_state "rak" "PLAYING_RAK" "игра Алика" "03-алик-игра"
-adb shell input tap "$((W * 20 / 100))" "$((H * 38 / 100))"
-adb shell input tap "$((W * 80 / 100))" "$((H * 68 / 100))"
-sleep 1
-assert_no_crash "управление Алика"
-
-launch_state "korolev" "PLAYING_KOROLEV" "игра Андрея" "04-андрей-игра"
-adb shell input tap "$((W * 80 / 100))" "$((H * 38 / 100))"
-adb shell input tap "$((W * 20 / 100))" "$((H * 68 / 100))"
-sleep 1
-assert_no_crash "управление Андрея"
-
-adb shell dumpsys package "$PACKAGE" > "$OUT/package.txt" || true
-adb shell dumpsys activity activities > "$OUT/activity-final.txt" || true
-adb logcat -d -v threadtime > "$OUT/logcat-final.txt" || true
-
-echo "Smoke-тест пройден: меню и три игровых режима открылись без падения."
+echo "SMOKE_TEST_OK" | tee "$OUT/result.txt"

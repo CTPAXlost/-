@@ -1,4 +1,4 @@
-name: Сборка APK ЕЛЦ
+name: Сборка и проверка APK ЕЛЦ
 
 on:
   workflow_dispatch:
@@ -9,14 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: elc-android-${{ github.ref }}
+  group: elc-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Собрать APK и проверить проект
+  build-and-test:
+    name: Собрать и запустить игру
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Скачать проект
@@ -34,7 +34,7 @@ jobs:
           gradle-version: "8.11.1"
           cache-cleanup: on-success
 
-      - name: Подготовить Android SDK
+      - name: Подготовить Android SDK 35
         shell: bash
         run: |
           set -euo pipefail
@@ -52,61 +52,38 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Проверить исходные файлы
+      - name: Проверить структуру проекта
         shell: bash
         run: |
           set -euo pipefail
-          test -s app/src/main/AndroidManifest.xml
           test -s app/src/main/java/ru/elc/arcade/MainActivity.java
           test -s app/src/main/java/ru/elc/arcade/GameView.java
-          test -s app/src/main/res/drawable-nodpi/menu_elc.png
+          test -s app/src/main/res/drawable-nodpi/menu_elc.jpg
+          test -s app/src/main/res/drawable-nodpi/head_lozhkin.png
+          test -s app/src/main/res/drawable-nodpi/head_rak.png
+          test -s app/src/main/res/drawable-nodpi/head_korolev.png
           test -s keystore/elc-development.jks
           bash -n scripts/smoke_test.sh
-          grep -q 'versionName "1.2.0"' app/build.gradle
+          grep -q "versionName '2.0.0'" app/build.gradle
 
-      - name: Собрать Debug и подписанный Release APK
+      - name: Собрать Debug и Release APK
         shell: bash
         run: |
           set -euo pipefail
-          gradle clean :app:assembleDebug :app:assembleRelease --stacktrace --no-daemon
+          gradle clean :app:assembleDebug :app:assembleRelease :app:lintRelease --stacktrace --no-daemon
 
-      - name: Проверить Android Lint
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle :app:lintRelease --stacktrace --no-daemon
-
-      - name: Проверить содержимое APK
+      - name: Проверить содержимое Release APK
         shell: bash
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/release/app-release.apk"
           test -s "$APK"
           unzip -t "$APK" >/dev/null
-          unzip -l "$APK" | grep -q 'AndroidManifest.xml'
-          unzip -l "$APK" | grep -q 'classes.dex'
-          unzip -l "$APK" | grep -q 'resources.arsc'
           AAPT="${ANDROID_SDK_ROOT}/build-tools/35.0.0/aapt"
           "$AAPT" dump badging "$APK" | tee apk-badging.txt
-          grep -q "package: name='ru.elc.arcade.debug'" apk-badging.txt
-          grep -q "versionName='1.2.0'" apk-badging.txt
+          grep -q "package: name='ru.elc.arcade'" apk-badging.txt
+          grep -q "versionName='2.0.0'" apk-badging.txt
           grep -q "launchable-activity: name='ru.elc.arcade.MainActivity'" apk-badging.txt
-
-      - name: Подготовить готовый APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/apk
-          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v1.2.0.apk"
-          sha256sum "artifacts/apk/ЕЛЦ-v1.2.0.apk" > "artifacts/apk/ЕЛЦ-v1.2.0.sha256.txt"
-
-      - name: Загрузить готовый APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ЕЛЦ — APK v1.2.0
-          path: artifacts/apk/*
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Разрешить аппаратное ускорение эмулятора
         shell: bash
@@ -115,8 +92,7 @@ jobs:
             sudo chmod 666 /dev/kvm
           fi
 
-      - name: Проверить реальный запуск в Android-эмуляторе
-        continue-on-error: true
+      - name: Запустить меню и три игровых режима
         uses: ReactiveCircus/android-emulator-runner@v2.38.0
         with:
           api-level: 29
@@ -128,16 +104,30 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: bash scripts/smoke_test.sh app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Загрузить журнал проверки запуска
+      - name: Подготовить APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/apk
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/apk/ЕЛЦ-v2.0.0.apk"
+          sha256sum "artifacts/apk/ЕЛЦ-v2.0.0.apk" > "artifacts/apk/ЕЛЦ-v2.0.0.sha256.txt"
+
+      - name: Загрузить проверенный APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ЕЛЦ — проверенный APK v2.0.0
+          path: artifacts/apk/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Загрузить скриншоты и журналы
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ЕЛЦ — журнал запуска v1.2.0
+          name: ЕЛЦ — проверка v2.0.0
           path: |
             artifacts/runtime-test/*
             apk-badging.txt
-            app/build/reports/lint-results-release.html
-            app/build/reports/lint-results-release.xml
-            app/build/reports/lint-results-release.txt
+            app/build/reports/lint-results-release.*
           if-no-files-found: ignore
           retention-days: 14
