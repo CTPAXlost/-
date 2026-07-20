@@ -1,26 +1,23 @@
-package ru.lovibutilki.game;
+package ru.elc.arcade;
 
 import android.app.Activity;
-import android.content.pm.ActivityInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
 public final class MainActivity extends Activity {
-
     private GameView gameView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
-
         gameView = new GameView(this);
         setContentView(gameView);
     }
@@ -36,12 +33,12 @@ public final class MainActivity extends Activity {
             }
         } else {
             getWindow().getDecorView().setSystemUiVisibility(
-                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             );
         }
     }
@@ -69,5 +66,14 @@ public final class MainActivity extends Activity {
         if (gameView != null) {
             gameView.onHostResume();
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onBackPressed() {
+        if (gameView != null && gameView.handleBack()) {
+            return;
+        }
+        super.onBackPressed();
     }
 }
